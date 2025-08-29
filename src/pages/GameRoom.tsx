@@ -63,8 +63,22 @@ const GameRoom: React.FC = () => {
   };
 
   const handleStartGame = async () => {
-    if (roomId && (await startGame(roomId))) {
-      // Game started, the real-time subscription will update the UI
+    console.log("GameRoom: Start Game button clicked");
+    console.log("GameRoom: roomId:", roomId);
+    console.log("GameRoom: isHost:", isHost);
+    console.log("GameRoom: allPlayersReady:", allPlayersReady);
+
+    if (roomId) {
+      const result = await startGame(roomId);
+      console.log("GameRoom: Start game result:", result);
+      if (result) {
+        console.log(
+          "GameRoom: Game started successfully, real-time should update UI"
+        );
+        // Game started, the real-time subscription will update the UI
+      }
+    } else {
+      console.log("GameRoom: No roomId available");
     }
   };
 
@@ -275,7 +289,12 @@ const GameRoom: React.FC = () => {
                   {/* Ready button */}
                   {currentPlayer && (
                     <button
-                      onClick={toggleReady}
+                      onClick={async () => {
+                        console.log("GameRoom: Ready button clicked");
+                        console.log("GameRoom: Current player:", currentPlayer);
+                        const result = await toggleReady();
+                        console.log("GameRoom: Toggle ready result:", result);
+                      }}
                       disabled={loading}
                       className={`w-full py-3 rounded-lg font-semibold transition-colors ${
                         currentPlayer.is_ready
