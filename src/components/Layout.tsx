@@ -1,17 +1,17 @@
-import React from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { 
-  Home, 
-  User, 
-  Settings, 
-  LogOut, 
+import React from "react";
+import { Link, useNavigate, useLocation } from "react-router-dom";
+import { motion } from "framer-motion";
+import {
+  Home,
+  User,
+  Settings,
+  LogOut,
   Shield,
   Coins,
-  Crown
-} from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
-import toast from 'react-hot-toast';
+  Crown,
+} from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import toast from "react-hot-toast";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -23,19 +23,26 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const location = useLocation();
 
   const handleSignOut = async () => {
-    await signOut();
-    navigate('/');
+    try {
+      console.log("Layout: Attempting to sign out...");
+      await signOut();
+      console.log("Layout: Sign out successful, navigating to login...");
+      navigate("/login");
+    } catch (error) {
+      console.error("Layout: Error during sign out:", error);
+      toast.error("Failed to sign out");
+    }
   };
 
   const navItems = [
-    { path: '/dashboard', icon: Home, label: 'Dashboard' },
-    { path: '/profile', icon: User, label: 'Profile' },
-    { path: '/settings', icon: Settings, label: 'Settings' },
+    { path: "/dashboard", icon: Home, label: "Dashboard" },
+    { path: "/profile", icon: User, label: "Profile" },
+    { path: "/settings", icon: Settings, label: "Settings" },
   ];
 
   // Add admin link for admins
-  if (user?.role === 'admin') {
-    navItems.splice(2, 0, { path: '/admin', icon: Shield, label: 'Admin' });
+  if (user?.role === "admin") {
+    navItems.splice(2, 0, { path: "/admin", icon: Shield, label: "Admin" });
   }
 
   const isActivePath = (path: string) => location.pathname === path;
@@ -71,7 +78,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                   </span>
                   <span className="text-gray-400 text-sm">chips</span>
                 </div>
-                
+
                 <div className="text-right">
                   <p className="text-white font-medium">{user.display_name}</p>
                   <p className="text-gray-400 text-sm">@{user.username}</p>
@@ -90,16 +97,17 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               {navItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = isActivePath(item.path);
-                
+
                 return (
                   <li key={item.path}>
                     <Link
                       to={item.path}
                       className={`
                         flex items-center space-x-3 px-4 py-3 rounded-lg transition-all duration-200
-                        ${isActive 
-                          ? 'bg-yellow-600 text-black font-semibold shadow-lg' 
-                          : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+                        ${
+                          isActive
+                            ? "bg-yellow-600 text-black font-semibold shadow-lg"
+                            : "text-gray-300 hover:bg-gray-700 hover:text-white"
                         }
                       `}
                     >
@@ -126,9 +134,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
         {/* Main Content */}
         <main className="flex-1 overflow-auto">
-          <div className="p-6">
-            {children}
-          </div>
+          <div className="p-6">{children}</div>
         </main>
       </div>
 

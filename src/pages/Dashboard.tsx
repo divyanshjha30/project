@@ -112,8 +112,12 @@ const Dashboard: React.FC = () => {
               <button
                 className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors"
                 onClick={async () => {
-                  await signOut();
-                  window.location.href = "/login";
+                  try {
+                    await signOut();
+                    navigate("/login");
+                  } catch (error) {
+                    console.error("Error signing out:", error);
+                  }
                 }}
               >
                 Sign Out

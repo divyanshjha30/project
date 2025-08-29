@@ -96,22 +96,54 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   useEffect(() => {
     let isMounted = true;
+    console.log("AuthContext: Initializing auth...");
 
-    // Get initial session
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (!isMounted) return;
-
-      if (session?.user) {
-        setSupabaseUser(session.user);
-        const userProfile = await fetchUserProfile(session.user.id);
-        if (isMounted) {
-          setUser(userProfile);
-        }
-      }
-      if (isMounted) {
+    // Set a safety timeout to prevent infinite loading
+    const safetyTimeout = setTimeout(() => {
+      if (isMounted && loading) {
+        console.warn("AuthContext: Safety timeout triggered, stopping loading");
         setLoading(false);
       }
-    });
+    }, 10000); // 10 second timeout
+
+    // Get initial session
+    supabase.auth
+      .getSession()
+      .then(async ({ data: { session } }) => {
+        if (!isMounted) return;
+
+        console.log("AuthContext: Initial session check:", !!session?.user);
+
+        if (session?.user) {
+          setSupabaseUser(session.user);
+          console.log(
+            "AuthContext: Fetching user profile for:",
+            session.user.id
+          );
+          try {
+            const userProfile = await fetchUserProfile(session.user.id);
+            if (isMounted) {
+              console.log("AuthContext: User profile loaded:", !!userProfile);
+              setUser(userProfile);
+            }
+          } catch (error) {
+            console.error("AuthContext: Error fetching user profile:", error);
+          }
+        }
+
+        if (isMounted) {
+          console.log("AuthContext: Initial auth check complete");
+          setLoading(false);
+          clearTimeout(safetyTimeout);
+        }
+      })
+      .catch((error) => {
+        console.error("AuthContext: Error getting initial session:", error);
+        if (isMounted) {
+          setLoading(false);
+          clearTimeout(safetyTimeout);
+        }
+      });
 
     // Listen for auth changes
     const {
@@ -119,16 +151,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!isMounted) return;
 
+      console.log("AuthContext: Auth state changed:", event);
+
       if (event === "SIGNED_IN" && session?.user) {
         setSupabaseUser(session.user);
         // Only fetch profile if we don't already have one for this user
         if (!user || user.id !== session.user.id) {
-          const userProfile = await fetchUserProfile(session.user.id);
-          if (isMounted) {
-            setUser(userProfile);
+          try {
+            const userProfile = await fetchUserProfile(session.user.id);
+            if (isMounted) {
+              setUser(userProfile);
+            }
+          } catch (error) {
+            console.error(
+              "AuthContext: Error fetching profile on sign in:",
+              error
+            );
           }
         }
       } else if (event === "SIGNED_OUT") {
+        console.log("AuthContext: User signed out");
         setSupabaseUser(null);
         setUser(null);
       }
@@ -139,7 +181,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     });
 
     return () => {
+      console.log("AuthContext: Cleaning up...");
       isMounted = false;
+      clearTimeout(safetyTimeout);
       subscription.unsubscribe();
     };
   }, []); // Keep empty dependency array - we only want this to run once
@@ -273,13 +317,46 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) {
-      toast.error(error.message);
-    } else {
-      toast.success("Signed out successfully!");
+    try {
+      console.log("AuthContext: Starting signOut process...");
+
+      // Set a timeout for the signOut process
+      const signOutPromise = supabase.auth.signOut();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("SignOut timeout")), 5000)
+      );
+
+      console.log("AuthContext: Calling supabase.auth.signOut()...");
+      const { error } = (await Promise.race([
+        signOutPromise,
+        timeoutPromise,
+      ])) as any;
+
+      console.log("AuthContext: SignOut result:", { error });
+
+      if (error && !error.message?.includes("timeout")) {
+        console.error("AuthContext: SignOut error:", error);
+        toast.error(error.message);
+      } else {
+        console.log("AuthContext: SignOut successful, clearing state...");
+        toast.success("Signed out successfully!");
+        setUser(null);
+        setSupabaseUser(null);
+
+        // Force clear local storage as backup
+        localStorage.removeItem("supabase.auth.token");
+        sessionStorage.clear();
+
+        console.log("AuthContext: State cleared successfully");
+      }
+    } catch (error) {
+      console.error("AuthContext: SignOut process failed:", error);
+      // Even if signOut fails, clear local state
       setUser(null);
       setSupabaseUser(null);
+      localStorage.removeItem("supabase.auth.token");
+      sessionStorage.clear();
+      toast.success("Signed out locally");
     }
   };
 
