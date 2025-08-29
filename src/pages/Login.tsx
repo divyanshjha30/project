@@ -1,23 +1,26 @@
-import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { Crown, Mail, Lock, Eye, EyeOff } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
-import toast from 'react-hot-toast';
+import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
+import { Crown, Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { useAuth } from "../contexts/AuthContext";
+import toast from "react-hot-toast";
 
 const Login: React.FC = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const { signIn } = useAuth();
+  const { signIn, clearStorage, user, loading } = useAuth();
   const navigate = useNavigate();
+
+  // Debug: Log auth state
+  console.log("Login component - Auth state:", { user, loading });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!email || !password) {
-      toast.error('Please fill in all fields');
+      toast.error("Please fill in all fields");
       return;
     }
 
@@ -26,7 +29,7 @@ const Login: React.FC = () => {
     setIsLoading(false);
 
     if (success) {
-      navigate('/dashboard');
+      navigate("/dashboard");
     }
   };
 
@@ -61,7 +64,10 @@ const Login: React.FC = () => {
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* Email field */}
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-300 mb-2">
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-gray-300 mb-2"
+              >
                 Email
               </label>
               <div className="relative">
@@ -80,14 +86,17 @@ const Login: React.FC = () => {
 
             {/* Password field */}
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-2">
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-gray-300 mb-2"
+              >
                 Password
               </label>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
                 <input
                   id="password"
-                  type={showPassword ? 'text' : 'password'}
+                  type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter your password"
@@ -99,7 +108,11 @@ const Login: React.FC = () => {
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-300"
                 >
-                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                  {showPassword ? (
+                    <EyeOff className="h-5 w-5" />
+                  ) : (
+                    <Eye className="h-5 w-5" />
+                  )}
                 </button>
               </div>
             </div>
@@ -110,14 +123,14 @@ const Login: React.FC = () => {
               disabled={isLoading}
               className="w-full py-3 bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-bold rounded-lg hover:from-yellow-500 hover:to-yellow-400 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-yellow-500/25"
             >
-              {isLoading ? 'Signing In...' : 'Sign In'}
+              {isLoading ? "Signing In..." : "Sign In"}
             </button>
           </form>
 
           {/* Register link */}
           <div className="mt-6 text-center">
             <p className="text-gray-400">
-              Don't have an account?{' '}
+              Don't have an account?{" "}
               <Link
                 to="/register"
                 className="text-yellow-400 hover:text-yellow-300 font-semibold transition-colors"
@@ -125,6 +138,17 @@ const Login: React.FC = () => {
                 Sign up now
               </Link>
             </p>
+          </div>
+
+          {/* Clear Storage button */}
+          <div className="mt-4 text-center">
+            <button
+              type="button"
+              onClick={clearStorage}
+              className="text-red-400 hover:text-red-300 text-sm underline transition-colors"
+            >
+              Clear Storage & Reset
+            </button>
           </div>
         </div>
 

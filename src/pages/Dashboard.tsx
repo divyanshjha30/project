@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useGame } from "../contexts/GameContext";
 import { useAuth } from "../contexts/AuthContext";
+import toast from "react-hot-toast";
 
 const Dashboard: React.FC = () => {
   const { rooms, fetchRooms, joinRoom, loading } = useGame();
@@ -20,31 +21,41 @@ const Dashboard: React.FC = () => {
   const [loadingTimeout, setLoadingTimeout] = useState(false);
 
   useEffect(() => {
-    console.log("Attempting to fetch rooms from Supabase...");
-    fetchRooms();
+    let isMounted = true;
+
+    const loadRooms = async () => {
+      if (isMounted) {
+        await fetchRooms();
+      }
+    };
+
+    loadRooms();
+
     // Set a timeout for loading
     const timer = setTimeout(() => {
-      if (loading) setLoadingTimeout(true);
+      if (loading && isMounted) setLoadingTimeout(true);
     }, 10000);
-    return () => clearTimeout(timer);
-  }, []);
 
-  useEffect(() => {
-    console.log("Rooms response:", rooms);
-    console.log("Loading state:", loading);
-    if (!loading && rooms.length === 0) {
-      // If no rooms exist, sign out and redirect to login
-      navigate("/login");
-    }
-    if (loadingTimeout) {
-      console.warn("Loading exceeded 10 seconds. Prompting user.");
-    }
-  }, [rooms, loading, loadingTimeout, navigate]);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, []); // Only run once on mount
 
   const handleQuickJoin = async (roomId: string) => {
-    const success = await joinRoom(roomId);
-    if (success) {
-      window.location.href = `/room/${roomId}`;
+    try {
+      console.log("Attempting to join room:", roomId);
+      const success = await joinRoom(roomId);
+      console.log("Join room result:", success);
+
+      if (success) {
+        console.log("Navigating to room:", roomId);
+        // Use React Router navigate to avoid page reload
+        navigate(`/room/${roomId}`);
+      }
+    } catch (error) {
+      console.error("Error joining room:", error);
+      toast.error("Failed to join room");
     }
   };
 
@@ -203,7 +214,7 @@ const Dashboard: React.FC = () => {
           </button>
         </div>
 
-        {rooms.length === 0 ? (
+        {rooms.length === 0 && !loading ? (
           <div className="bg-gray-800 border border-gray-700 rounded-xl p-12 text-center">
             <Users className="h-16 w-16 text-gray-500 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-white mb-2">

@@ -41,11 +41,13 @@ const GameRoom: React.FC = () => {
       fetchRoomDetails(roomId);
       // Set a timeout for loading
       const timer = setTimeout(() => {
-        if (loading) setLoadingTimeout(true);
+        if (loading) {
+          setLoadingTimeout(true);
+        }
       }, 10000);
       return () => clearTimeout(timer);
     }
-  }, [roomId, loading]);
+  }, [roomId]); // Removed loading from dependency array to prevent loops
 
   const handleLeaveRoom = async () => {
     if (roomId && (await leaveRoom(roomId))) {
@@ -71,11 +73,49 @@ const GameRoom: React.FC = () => {
   const allPlayersReady =
     roomPlayers.length >= 2 && roomPlayers.every((p) => p.is_ready);
 
-  if (!roomId || !currentRoom) {
+  if (!roomId) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <h1 className="text-2xl font-bold text-white mb-4">
+            Room ID missing
+          </h1>
+          <button
+            onClick={() => navigate("/dashboard")}
+            className="px-6 py-3 bg-yellow-600 text-black rounded-lg font-semibold hover:bg-yellow-500 transition-colors"
+          >
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && !currentRoom) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-yellow-400 mx-auto mb-4"></div>
+          <h2 className="text-xl font-semibold text-white mb-2">
+            Loading room...
+          </h2>
+          <p className="text-gray-400">
+            Please wait while we fetch room details
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentRoom) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center">
           <h1 className="text-2xl font-bold text-white mb-4">Room not found</h1>
+          <p className="text-gray-400 mb-4">
+            The room you're looking for doesn't exist or you don't have access
+            to it.
+          </p>
           <button
             onClick={() => navigate("/dashboard")}
             className="px-6 py-3 bg-yellow-600 text-black rounded-lg font-semibold hover:bg-yellow-500 transition-colors"
@@ -431,7 +471,7 @@ const GameRoom: React.FC = () => {
                   className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors"
                   onClick={async () => {
                     await signOut();
-                    navigate('/dashboard');
+                    navigate("/dashboard");
                   }}
                 >
                   Go Back
