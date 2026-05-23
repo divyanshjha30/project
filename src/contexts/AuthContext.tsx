@@ -98,90 +98,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     let isMounted = true;
     console.log("AuthContext: Initializing auth...");
 
-    // Set a safety timeout to prevent infinite loading
-    const safetyTimeout = setTimeout(() => {
-      if (isMounted && loading) {
-        console.warn("AuthContext: Safety timeout triggered, stopping loading");
-        setLoading(false);
-      }
-    }, 10000); // 10 second timeout
-
-    // Get initial session
-    supabase.auth
-      .getSession()
-      .then(async ({ data: { session } }) => {
-        if (!isMounted) return;
-
-        console.log("AuthContext: Initial session check:", !!session?.user);
-
-        if (session?.user) {
-          setSupabaseUser(session.user);
-          console.log(
-            "AuthContext: Fetching user profile for:",
-            session.user.id,
-          );
-          try {
-            const userProfile = await fetchUserProfile(session.user.id);
-            if (isMounted) {
-              console.log("AuthContext: User profile loaded:", !!userProfile);
-              setUser(userProfile);
-            }
-          } catch (error) {
-            console.error("AuthContext: Error fetching user profile:", error);
-          }
-        }
-
-        if (isMounted) {
-          console.log("AuthContext: Initial auth check complete");
-          setLoading(false);
-          clearTimeout(safetyTimeout);
-        }
-      })
-      .catch((error) => {
-        console.error("AuthContext: Error getting initial session:", error);
-        if (isMounted) {
-          setLoading(false);
-          clearTimeout(safetyTimeout);
-        }
-      });
-
-    // Listen for auth changes
+    // Listen for auth changes - this fires synchronously on init with current session
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
 
       console.log("AuthContext: Auth state changed:", event);
 
       if (event === "SIGNED_IN" && session?.user) {
         setSupabaseUser(session.user);
-        // Only fetch profile if we don't already have one for this user
-        if (!user || user.id !== session.user.id) {
+        // Defer DB call to avoid deadlock with auth state lock
+        setTimeout(async () => {
+          if (!isMounted) return;
           try {
+            console.log("AuthContext: Fetching user profile for:", session.user.id);
             const userProfile = await fetchUserProfile(session.user.id);
             if (isMounted) {
+              console.log("AuthContext: User profile loaded:", !!userProfile);
               setUser(userProfile);
+              setLoading(false);
             }
           } catch (error) {
-            console.error(
-              "AuthContext: Error fetching profile on sign in:",
-              error,
-            );
+            console.error("AuthContext: Error fetching profile:", error);
+            if (isMounted) setLoading(false);
           }
-        }
+        }, 0);
       } else if (event === "SIGNED_OUT") {
         console.log("AuthContext: User signed out");
         setSupabaseUser(null);
         setUser(null);
-      }
-
-      if (isMounted) {
         setLoading(false);
+      } else if (event === "INITIAL_SESSION") {
+        // No session exists
+        if (!session) {
+          console.log("AuthContext: No initial session");
+          setLoading(false);
+        }
       }
     });
 
+    // Safety timeout in case something goes wrong
+    const safetyTimeout = setTimeout(() => {
+      if (isMounted && loading) {
+        console.warn("AuthContext: Safety timeout triggered, stopping loading");
+        setLoading(false);
+      }
+    }, 5000);
+
     return () => {
-      console.log("AuthContext: Cleaning up...");
       isMounted = false;
       clearTimeout(safetyTimeout);
       subscription.unsubscribe();
