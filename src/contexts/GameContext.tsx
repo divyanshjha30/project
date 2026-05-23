@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+} from "react";
 import { supabase } from "../lib/supabase";
 import { Room, RoomPlayer, Game, User } from "../types";
 import { useAuth } from "./AuthContext";
@@ -15,7 +22,7 @@ interface GameContextType {
     gameType: "poker" | "blackjack",
     maxPlayers: number,
     minBet: number,
-    isPrivate: boolean
+    isPrivate: boolean,
   ) => Promise<Room | null>;
   joinRoom: (roomId: string, inviteCode?: string) => Promise<boolean>;
   leaveRoom: (roomId: string) => Promise<boolean>;
@@ -44,8 +51,15 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
   const [roomPlayers, setRoomPlayers] = useState<RoomPlayer[]>([]);
   const [currentGame, setCurrentGame] = useState<Game | null>(null);
   const [loading, setLoading] = useState(false);
-  const [lastFetchTime, setLastFetchTime] = useState(0);
-  const [lastFetchRoomDetailsTime, setLastFetchRoomDetailsTime] = useState(0);
+
+  // Use refs to avoid stale closures in realtime callbacks
+  const currentRoomRef = useRef<Room | null>(null);
+  const lastFetchTimeRef = useRef(0);
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    currentRoomRef.current = currentRoom;
+  }, [currentRoom]);
 
   // Subscribe to real-time changes
   useEffect(() => {
@@ -53,63 +67,54 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
 
     console.log("GameContext: Setting up real-time subscriptions...");
 
-    // Subscribe to room changes
-    const roomsSubscription = supabase
-      .channel("public:rooms")
+    const channelId = `realtime-${user.id}-${Date.now()}`;
+
+    // Single channel for all table changes
+    const subscription = supabase
+      .channel(channelId)
       .on(
         "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "rooms",
-        },
+        { event: "*", schema: "public", table: "rooms" },
         (_payload) => {
-          console.log("Real-time: Room changed, refreshing rooms list");
-          fetchRooms();
-        }
+          console.log("Real-time: Room changed");
+          fetchRoomsInternal();
+          // Also refresh current room if we're in one
+          if (currentRoomRef.current) {
+            fetchRoomDetailsInternal(currentRoomRef.current.id);
+          }
+        },
       )
-      .subscribe();
-
-    // Subscribe to room players changes - this should handle ready state updates automatically
-    const playersSubscription = supabase
-      .channel("public:room_players")
       .on(
         "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "room_players",
-        },
+        { event: "*", schema: "public", table: "room_players" },
         (payload) => {
-          console.log("Real-time: Room players changed:", payload);
-          // If we're currently in a room, refresh the room details
-          if (currentRoom) {
-            console.log(
-              "Real-time: Refreshing current room details due to player change"
-            );
-            fetchRoomDetails(currentRoom.id);
+          console.log("Real-time: Room players changed:", payload.eventType);
+          if (currentRoomRef.current) {
+            fetchRoomDetailsInternal(currentRoomRef.current.id);
           }
-        }
+        },
       )
-      .subscribe();
-
-    console.log("GameContext: Real-time subscriptions active");
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "games" },
+        (payload) => {
+          console.log("Real-time: Games changed:", payload.eventType);
+          if (currentRoomRef.current) {
+            fetchRoomDetailsInternal(currentRoomRef.current.id);
+          }
+        },
+      )
+      .subscribe((status) => {
+        console.log("GameContext: Realtime subscription status:", status);
+      });
 
     return () => {
       console.log("GameContext: Cleaning up real-time subscriptions");
-      supabase.removeChannel(roomsSubscription);
-      supabase.removeChannel(playersSubscription);
+      supabase.removeChannel(subscription);
     };
-  }, [user?.id, currentRoom?.id]);
+  }, [user?.id]);
 
-  const fetchRooms = async () => {
-    // Prevent too frequent calls (minimum 1 second between calls)
-    const now = Date.now();
-    if (now - lastFetchTime < 1000) {
-      return;
-    }
-    setLastFetchTime(now);
-
+  const fetchRoomsInternal = async () => {
     try {
       const { data, error } = await supabase
         .from("rooms")
@@ -117,7 +122,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
           `
           *,
           users!rooms_host_user_id_fkey(display_name, username)
-        `
+        `,
         )
         .eq("status", "waiting")
         .order("created_at", { ascending: false });
@@ -133,19 +138,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const fetchRoomDetails = async (roomId: string) => {
-    // Prevent duplicate calls within 500ms
+  const fetchRooms = async () => {
+    // Throttle user-triggered calls (minimum 1 second between calls)
     const now = Date.now();
-    if (now - lastFetchRoomDetailsTime < 500) {
-      console.log("fetchRoomDetails: Skipping duplicate call");
+    if (now - lastFetchTimeRef.current < 1000) {
       return;
     }
-    setLastFetchRoomDetailsTime(now);
+    lastFetchTimeRef.current = now;
+    await fetchRoomsInternal();
+  };
 
+  const fetchRoomDetailsInternal = async (roomId: string) => {
     try {
-      console.log("Starting fetchRoomDetails for room:", roomId);
-      setLoading(true);
-
       // Fetch room details
       const { data: roomData, error: roomError } = await supabase
         .from("rooms")
@@ -155,44 +159,32 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
 
       if (roomError) {
         console.error("Error fetching room:", roomError);
-        toast.error("Failed to load room details");
-        setLoading(false);
         return;
       }
 
-      console.log("Room data fetched successfully:", roomData);
       setCurrentRoom(roomData);
 
-      // Fetch room players - with better error handling
-      console.log("Fetching room players for room:", roomId);
+      // Fetch room players
       const { data: playersData, error: playersError } = await supabase
         .from("room_players")
         .select(
           `
           *,
           users(*)
-        `
+        `,
         )
         .eq("room_id", roomId)
         .order("seat_index");
 
       if (playersError) {
         console.error("Error fetching room players:", playersError);
-        console.error(
-          "RLS Error details:",
-          playersError.details,
-          playersError.hint
-        );
-        // Don't fail completely if players can't be loaded, just show empty
         setRoomPlayers([]);
-        toast.error("Could not load players due to database policies");
       } else {
-        console.log("Room players fetched successfully:", playersData);
         setRoomPlayers(
           playersData?.map((player) => ({
             ...player,
             user: player.users as User,
-          })) || []
+          })) || [],
         );
       }
 
@@ -213,9 +205,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     } catch (error) {
       console.error("Error fetching room details:", error);
-      toast.error("Failed to load room");
+    }
+  };
+
+  const fetchRoomDetails = async (roomId: string) => {
+    try {
+      setLoading(true);
+      await fetchRoomDetailsInternal(roomId);
     } finally {
-      console.log("fetchRoomDetails completed, setting loading to false");
       setLoading(false);
     }
   };
@@ -225,7 +222,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     gameType: "poker" | "blackjack",
     maxPlayers: number,
     minBet: number,
-    isPrivate: boolean
+    isPrivate: boolean,
   ): Promise<Room | null> => {
     if (!user) return null;
 
@@ -256,8 +253,21 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
         return null;
       }
 
+      // Auto-join host as first player
+      const { error: joinError } = await supabase.from("room_players").insert({
+        room_id: data.id,
+        user_id: user.id,
+        seat_index: 0,
+        chip_count: Math.min(user.chip_balance, 1000),
+      });
+
+      if (joinError) {
+        console.error("Error auto-joining host:", joinError);
+        // Room created but host couldn't join - still return room
+      }
+
       toast.success("Room created successfully!");
-      await fetchRooms();
+      await fetchRoomsInternal();
       return data;
     } catch (error) {
       console.error("Error creating room:", error);
@@ -270,7 +280,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const joinRoom = async (
     roomId: string,
-    inviteCode?: string
+    inviteCode?: string,
   ): Promise<boolean> => {
     console.log("joinRoom called with roomId:", roomId, "user:", user?.id);
 
@@ -422,56 +432,40 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const toggleReady = async (): Promise<boolean> => {
-    console.log("toggleReady called");
-    console.log("toggleReady: user exists?", !!user);
-    console.log("toggleReady: currentRoom exists?", !!currentRoom);
-    console.log("toggleReady: roomPlayers count:", roomPlayers.length);
-
-    if (!user || !currentRoom) {
-      console.log("toggleReady: Missing user or currentRoom, returning false");
-      return false;
-    }
+    if (!user || !currentRoom) return false;
 
     try {
       const currentPlayer = roomPlayers.find((p) => p.user_id === user.id);
-      console.log("toggleReady: currentPlayer found?", !!currentPlayer);
-      console.log(
-        "toggleReady: currentPlayer ready status:",
-        currentPlayer?.is_ready
-      );
+      if (!currentPlayer) return false;
 
-      if (!currentPlayer) {
-        console.log("toggleReady: No current player found, returning false");
-        return false;
-      }
+      const newReadyState = !currentPlayer.is_ready;
 
-      console.log(
-        "toggleReady: Attempting to update ready status to:",
-        !currentPlayer.is_ready
+      // Optimistic update - immediately reflect in UI
+      setRoomPlayers((prev) =>
+        prev.map((p) =>
+          p.user_id === user.id ? { ...p, is_ready: newReadyState } : p,
+        ),
       );
 
       const { error } = await supabase
         .from("room_players")
-        .update({ is_ready: !currentPlayer.is_ready })
+        .update({ is_ready: newReadyState })
         .eq("room_id", currentRoom.id)
         .eq("user_id", user.id);
 
-      console.log("toggleReady: Update result:", { error });
-
       if (error) {
         console.error("Error toggling ready:", error);
+        // Revert optimistic update
+        setRoomPlayers((prev) =>
+          prev.map((p) =>
+            p.user_id === user.id ? { ...p, is_ready: !newReadyState } : p,
+          ),
+        );
         toast.error("Failed to update ready status");
         return false;
       }
 
-      console.log("toggleReady: Successfully updated ready status");
-
-      // Real-time subscription will automatically update the UI
-      console.log("toggleReady: Waiting for real-time update...");
-
-      toast.success(
-        currentPlayer.is_ready ? "Marked as not ready" : "Marked as ready"
-      );
+      toast.success(newReadyState ? "Marked as ready!" : "Marked as not ready");
       return true;
     } catch (error) {
       console.error("Error toggling ready:", error);
