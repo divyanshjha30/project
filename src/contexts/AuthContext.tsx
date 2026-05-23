@@ -12,7 +12,7 @@ interface AuthContextType {
     email: string,
     password: string,
     username: string,
-    displayName: string
+    displayName: string,
   ) => Promise<boolean>;
   signOut: () => Promise<void>;
   clearStorage: () => Promise<void>;
@@ -71,7 +71,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
       const { data: createdUser, error: createError } = await supabase
         .from("users")
-        .insert([newUser])
+        .upsert([newUser], { onConflict: "id" })
         .select()
         .single();
 
@@ -118,7 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           setSupabaseUser(session.user);
           console.log(
             "AuthContext: Fetching user profile for:",
-            session.user.id
+            session.user.id,
           );
           try {
             const userProfile = await fetchUserProfile(session.user.id);
@@ -165,7 +165,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           } catch (error) {
             console.error(
               "AuthContext: Error fetching profile on sign in:",
-              error
+              error,
             );
           }
         }
@@ -232,7 +232,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     email: string,
     password: string,
     username: string,
-    displayName: string
+    displayName: string,
   ): Promise<boolean> => {
     try {
       setLoading(true);
@@ -242,7 +242,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         {
           email,
           password,
-        }
+        },
       );
 
       if (signUpError) {
@@ -259,7 +259,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
       console.log(
         "User created in auth, creating profile for ID:",
-        authData.user.id
+        authData.user.id,
       );
 
       // Wait a moment for auth to fully process
@@ -282,7 +282,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
       const { data: createdProfile, error: profileError } = await supabase
         .from("users")
-        .insert(userProfile)
+        .upsert(userProfile, { onConflict: "id" })
         .select()
         .single();
 
@@ -323,7 +323,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       // Set a timeout for the signOut process
       const signOutPromise = supabase.auth.signOut();
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("SignOut timeout")), 5000)
+        setTimeout(() => reject(new Error("SignOut timeout")), 5000),
       );
 
       console.log("AuthContext: Calling supabase.auth.signOut()...");
