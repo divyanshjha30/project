@@ -9,7 +9,12 @@ import React, {
 import { supabase } from "../lib/supabase";
 import { Room, RoomPlayer, Game, User, PokerGameState, Card } from "../types";
 import { useAuth } from "./AuthContext";
-import { createDeck, shuffleDeck, dealCards, calculatePokerHandRank } from "../utils/cardUtils";
+import {
+  createDeck,
+  shuffleDeck,
+  dealCards,
+  calculatePokerHandRank,
+} from "../utils/cardUtils";
 import toast from "react-hot-toast";
 
 interface GameContextType {
@@ -31,7 +36,11 @@ interface GameContextType {
   fetchRooms: () => Promise<void>;
   fetchRoomDetails: (roomId: string) => Promise<void>;
   startGame: (roomId: string) => Promise<boolean>;
-  makeMove: (action: "fold" | "call" | "raise" | "check", amount?: number) => Promise<boolean>;
+  makeMove: (
+    action: "fold" | "call" | "raise" | "check",
+    amount?: number,
+  ) => Promise<boolean>;
+  dealNextHand: () => Promise<boolean>;
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
@@ -534,7 +543,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     const activePlayers = state.players.filter(
       (p) => !p.has_folded && !p.is_all_in,
     );
-    if (activePlayers.length <= 1 && state.phase !== "showdown" && state.phase !== "finished") {
+    if (
+      activePlayers.length <= 1 &&
+      state.phase !== "showdown" &&
+      state.phase !== "finished"
+    ) {
       while (state.community_cards.length < 5) {
         const { cards, remaining } = dealCards(state.deck, 1);
         state.community_cards.push(cards[0]);
@@ -547,21 +560,71 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // Helper: determine winner at showdown
   const determineWinner = (state: PokerGameState) => {
+    const potTotal = state.pot;
     const nonFolded = state.players.filter((p) => !p.has_folded);
+    const foldedPlayers = state.players.filter((p) => p.has_folded);
+
     if (nonFolded.length === 1) {
-      nonFolded[0].chip_count += state.pot;
+      // Won by everyone else folding
+      const winner = nonFolded[0];
+      winner.chip_count += potTotal;
+      state.result = {
+        winners: [
+          {
+            user_id: winner.user_id,
+            hand_description: "Last player standing",
+            chips_won: potTotal,
+          },
+        ],
+        losers: foldedPlayers.map((p) => ({
+          user_id: p.user_id,
+          hand_description: "Folded",
+          chips_lost: 0,
+          folded: true,
+        })),
+        pot_total: potTotal,
+        winning_hand: "Everyone else folded",
+      };
     } else {
+      // Evaluate hands
       const hands = nonFolded.map((p) => ({
         player: p,
         rank: calculatePokerHandRank([...p.cards, ...state.community_cards]),
       }));
       const bestRank = Math.max(...hands.map((h) => h.rank.rank));
       const winners = hands.filter((h) => h.rank.rank === bestRank);
-      const share = Math.floor(state.pot / winners.length);
+      const losers = hands.filter((h) => h.rank.rank !== bestRank);
+      const share = Math.floor(potTotal / winners.length);
+
       winners.forEach((w) => {
         w.player.chip_count += share;
       });
+
+      state.result = {
+        winners: winners.map((w) => ({
+          user_id: w.player.user_id,
+          hand_description: w.rank.description,
+          chips_won: share,
+        })),
+        losers: [
+          ...losers.map((l) => ({
+            user_id: l.player.user_id,
+            hand_description: l.rank.description,
+            chips_lost: 0,
+            folded: false,
+          })),
+          ...foldedPlayers.map((p) => ({
+            user_id: p.user_id,
+            hand_description: "Folded",
+            chips_lost: 0,
+            folded: true,
+          })),
+        ],
+        pot_total: potTotal,
+        winning_hand: winners[0].rank.description,
+      };
     }
+
     state.pot = 0;
     state.phase = "finished";
   };
@@ -800,6 +863,103 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
+  const dealNextHand = async (): Promise<boolean> => {
+    if (!user || !currentRoom || !currentGame) return false;
+
+    try {
+      const oldState = currentGame.game_state as PokerGameState;
+      const minBet = currentRoom.min_bet || 10;
+      const smallBlind = Math.floor(minBet / 2);
+      const bigBlind = minBet;
+
+      // Use chip counts from the finished hand, filter out busted players
+      const activePlayers = oldState.players.filter((p) => p.chip_count > 0);
+      if (activePlayers.length < 2) {
+        toast.error("Not enough players with chips to continue");
+        return false;
+      }
+
+      // Rotate dealer position
+      const newDealerPos =
+        (oldState.dealer_position + 1) % activePlayers.length;
+
+      const deck = shuffleDeck(createDeck());
+      const players = activePlayers.map((p) => ({
+        user_id: p.user_id,
+        seat_index: p.seat_index,
+        cards: [] as Card[],
+        chip_count: p.chip_count,
+        current_bet: 0,
+        has_acted: false,
+        has_folded: false,
+        is_all_in: false,
+      }));
+
+      // Deal hole cards
+      let currentDeck = deck;
+      for (let round = 0; round < 2; round++) {
+        for (const player of players) {
+          const { cards, remaining } = dealCards(currentDeck, 1);
+          player.cards.push(cards[0]);
+          currentDeck = remaining;
+        }
+      }
+
+      // Post blinds
+      const sbIndex = (newDealerPos + 1) % players.length;
+      const bbIndex = (newDealerPos + 2) % players.length;
+
+      const sbAmount = Math.min(smallBlind, players[sbIndex].chip_count);
+      players[sbIndex].current_bet = sbAmount;
+      players[sbIndex].chip_count -= sbAmount;
+
+      const bbAmount = Math.min(bigBlind, players[bbIndex].chip_count);
+      players[bbIndex].current_bet = bbAmount;
+      players[bbIndex].chip_count -= bbAmount;
+
+      const firstToAct =
+        players.length === 2 ? sbIndex : (newDealerPos + 3) % players.length;
+
+      const newState: PokerGameState = {
+        type: "poker",
+        phase: "preflop",
+        deck: currentDeck,
+        community_cards: [],
+        pot: sbAmount + bbAmount,
+        current_bet: bbAmount,
+        dealer_position: newDealerPos,
+        current_player: firstToAct,
+        small_blind: smallBlind,
+        big_blind: bigBlind,
+        players,
+      };
+
+      // Mark old game as finished and create new one
+      await supabase
+        .from("games")
+        .update({ finished_at: new Date().toISOString() })
+        .eq("id", currentGame.id);
+
+      const { error } = await supabase
+        .from("games")
+        .insert({ room_id: currentRoom.id, game_state: newState })
+        .select()
+        .single();
+
+      if (error) {
+        toast.error("Failed to deal next hand");
+        return false;
+      }
+
+      toast.success("New hand dealt!");
+      return true;
+    } catch (error) {
+      console.error("Error dealing next hand:", error);
+      toast.error("Failed to deal next hand");
+      return false;
+    }
+  };
+
   // Load initial data
   useEffect(() => {
     if (user) {
@@ -821,6 +981,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     fetchRoomDetails,
     startGame,
     makeMove,
+    dealNextHand,
   };
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;

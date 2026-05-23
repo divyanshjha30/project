@@ -5,7 +5,7 @@ export interface User {
   display_name: string;
   avatar_url?: string;
   chip_balance: number;
-  role: 'user' | 'admin' | 'mod';
+  role: "user" | "admin" | "mod";
   total_games: number;
   games_won: number;
   games_lost: number;
@@ -16,9 +16,9 @@ export interface User {
 export interface Room {
   id: string;
   name: string;
-  game_type: 'poker' | 'blackjack';
+  game_type: "poker" | "blackjack";
   host_user_id: string;
-  status: 'waiting' | 'playing' | 'finished';
+  status: "waiting" | "playing" | "finished";
   max_players: number;
   current_players: number;
   min_bet: number;
@@ -52,15 +52,15 @@ export interface Game {
 }
 
 export interface Card {
-  suit: 'hearts' | 'diamonds' | 'clubs' | 'spades';
+  suit: "hearts" | "diamonds" | "clubs" | "spades";
   rank: string;
   value: number;
   id: string;
 }
 
 export interface PokerGameState {
-  type: 'poker';
-  phase: 'preflop' | 'flop' | 'turn' | 'river' | 'showdown' | 'finished';
+  type: "poker";
+  phase: "preflop" | "flop" | "turn" | "river" | "showdown" | "finished";
   deck: Card[];
   community_cards: Card[];
   pot: number;
@@ -70,6 +70,23 @@ export interface PokerGameState {
   small_blind: number;
   big_blind: number;
   players: PokerPlayer[];
+  result?: PokerResult;
+}
+
+export interface PokerResult {
+  winners: {
+    user_id: string;
+    hand_description: string;
+    chips_won: number;
+  }[];
+  losers: {
+    user_id: string;
+    hand_description: string;
+    chips_lost: number;
+    folded: boolean;
+  }[];
+  pot_total: number;
+  winning_hand: string;
 }
 
 export interface PokerPlayer {
@@ -84,8 +101,8 @@ export interface PokerPlayer {
 }
 
 export interface BlackjackGameState {
-  type: 'blackjack';
-  phase: 'betting' | 'dealing' | 'playing' | 'dealer_turn' | 'finished';
+  type: "blackjack";
+  phase: "betting" | "dealing" | "playing" | "dealer_turn" | "finished";
   deck: Card[];
   dealer_cards: Card[];
   dealer_visible_cards: Card[];
@@ -105,7 +122,7 @@ export interface BlackjackPlayer {
 export interface BlackjackHand {
   cards: Card[];
   bet: number;
-  status: 'playing' | 'stand' | 'bust' | 'blackjack' | 'finished';
+  status: "playing" | "stand" | "bust" | "blackjack" | "finished";
   value: number;
   soft_ace: boolean;
 }
@@ -139,7 +156,13 @@ export interface AdminAudit {
 }
 
 export interface RealtimeGameEvent {
-  type: 'player_joined' | 'player_left' | 'game_started' | 'move_made' | 'game_ended' | 'chips_updated';
+  type:
+    | "player_joined"
+    | "player_left"
+    | "game_started"
+    | "move_made"
+    | "game_ended"
+    | "chips_updated";
   payload: any;
   timestamp: string;
 }

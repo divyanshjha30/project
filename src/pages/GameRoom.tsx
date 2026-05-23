@@ -31,6 +31,7 @@ const GameRoom: React.FC = () => {
     toggleReady,
     startGame,
     makeMove,
+    dealNextHand,
     loading,
   } = useGame();
 
@@ -75,7 +76,7 @@ const GameRoom: React.FC = () => {
       console.log("GameRoom: Start game result:", result);
       if (result) {
         console.log(
-          "GameRoom: Game started successfully, real-time should update UI"
+          "GameRoom: Game started successfully, real-time should update UI",
         );
         // Game started, the real-time subscription will update the UI
       }
@@ -276,7 +277,7 @@ const GameRoom: React.FC = () => {
                           Waiting for player...
                         </span>
                       </div>
-                    )
+                    ),
                   )}
                 </div>
               </div>
@@ -376,6 +377,8 @@ const GameRoom: React.FC = () => {
             currentRoom={currentRoom}
             user={user}
             makeMove={makeMove}
+            dealNextHand={dealNextHand}
+            isHost={isHost}
             raiseAmount={raiseAmount}
             setRaiseAmount={setRaiseAmount}
             roomPlayers={roomPlayers}
@@ -492,11 +495,26 @@ const ActiveGameView: React.FC<{
   currentGame: any;
   currentRoom: any;
   user: any;
-  makeMove: (action: "fold" | "call" | "raise" | "check", amount?: number) => Promise<boolean>;
+  makeMove: (
+    action: "fold" | "call" | "raise" | "check",
+    amount?: number,
+  ) => Promise<boolean>;
+  dealNextHand: () => Promise<boolean>;
+  isHost: boolean;
   raiseAmount: number;
   setRaiseAmount: (n: number) => void;
   roomPlayers: any[];
-}> = ({ currentGame, currentRoom, user, makeMove, raiseAmount, setRaiseAmount, roomPlayers }) => {
+}> = ({
+  currentGame,
+  currentRoom,
+  user,
+  makeMove,
+  dealNextHand,
+  isHost,
+  raiseAmount,
+  setRaiseAmount,
+  roomPlayers,
+}) => {
   if (!currentGame?.game_state) {
     return (
       <div className="max-w-4xl mx-auto text-center py-20">
@@ -507,11 +525,20 @@ const ActiveGameView: React.FC<{
   }
 
   const gameState = currentGame.game_state as any;
-  const myPlayerIndex = gameState.players?.findIndex((p: any) => p.user_id === user?.id) ?? -1;
+  const myPlayerIndex =
+    gameState.players?.findIndex((p: any) => p.user_id === user?.id) ?? -1;
   const myPlayer = myPlayerIndex >= 0 ? gameState.players[myPlayerIndex] : null;
-  const isMyTurn = gameState.current_player === myPlayerIndex && gameState.phase !== "finished" && gameState.phase !== "showdown";
-  const canCheck = isMyTurn && (gameState.current_bet === 0 || (myPlayer && myPlayer.current_bet === gameState.current_bet));
-  const callAmount = myPlayer ? gameState.current_bet - myPlayer.current_bet : 0;
+  const isMyTurn =
+    gameState.current_player === myPlayerIndex &&
+    gameState.phase !== "finished" &&
+    gameState.phase !== "showdown";
+  const canCheck =
+    isMyTurn &&
+    (gameState.current_bet === 0 ||
+      (myPlayer && myPlayer.current_bet === gameState.current_bet));
+  const callAmount = myPlayer
+    ? gameState.current_bet - myPlayer.current_bet
+    : 0;
   const minRaise = gameState.current_bet * 2 || gameState.big_blind * 2;
 
   const getPlayerDisplayName = (userId: string) => {
@@ -519,17 +546,42 @@ const ActiveGameView: React.FC<{
     return rp?.user?.display_name || userId.slice(0, 8);
   };
 
-  const suitSymbol: Record<string, string> = { hearts: "♥", diamonds: "♦", clubs: "♣", spades: "♠" };
-  const suitColor: Record<string, string> = { hearts: "text-red-500", diamonds: "text-red-500", clubs: "text-white", spades: "text-white" };
+  const suitSymbol: Record<string, string> = {
+    hearts: "♥",
+    diamonds: "♦",
+    clubs: "♣",
+    spades: "♠",
+  };
+  const suitColor: Record<string, string> = {
+    hearts: "text-red-500",
+    diamonds: "text-red-500",
+    clubs: "text-gray-900",
+    spades: "text-gray-900",
+  };
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       {/* Game Info Bar */}
       <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl p-4">
         <div className="flex items-center space-x-6">
-          <span className="text-gray-400 text-sm">Phase: <span className="text-yellow-400 font-semibold uppercase">{gameState.phase}</span></span>
-          <span className="text-gray-400 text-sm">Pot: <span className="text-yellow-400 font-semibold">{gameState.pot} chips</span></span>
-          <span className="text-gray-400 text-sm">Blinds: <span className="text-white">{gameState.small_blind}/{gameState.big_blind}</span></span>
+          <span className="text-gray-400 text-sm">
+            Phase:{" "}
+            <span className="text-yellow-400 font-semibold uppercase">
+              {gameState.phase}
+            </span>
+          </span>
+          <span className="text-gray-400 text-sm">
+            Pot:{" "}
+            <span className="text-yellow-400 font-semibold">
+              {gameState.pot} chips
+            </span>
+          </span>
+          <span className="text-gray-400 text-sm">
+            Blinds:{" "}
+            <span className="text-white">
+              {gameState.small_blind}/{gameState.big_blind}
+            </span>
+          </span>
         </div>
         {isMyTurn && (
           <span className="bg-yellow-600 text-black px-3 py-1 rounded-full text-sm font-bold animate-pulse">
@@ -545,28 +597,35 @@ const ActiveGameView: React.FC<{
 
       {/* Community Cards */}
       <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
-        <h3 className="text-sm text-gray-400 mb-3 text-center">Community Cards</h3>
+        <h3 className="text-sm text-gray-400 mb-3 text-center">
+          Community Cards
+        </h3>
         <div className="flex justify-center gap-3">
-          {gameState.community_cards && gameState.community_cards.length > 0 ? (
-            gameState.community_cards.map((card: any, i: number) => (
-              <motion.div
-                key={card.id || i}
-                initial={{ opacity: 0, rotateY: 180 }}
-                animate={{ opacity: 1, rotateY: 0 }}
-                transition={{ delay: i * 0.15, duration: 0.3 }}
-                className="w-16 h-24 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-center shadow-lg"
-              >
-                <span className={`text-xl font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
-                <span className={`text-2xl ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
-              </motion.div>
-            ))
-          ) : (
-            Array.from({ length: 5 }, (_, i) => (
-              <div key={i} className="w-16 h-24 bg-gray-700 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center">
-                <span className="text-gray-500 text-xs">?</span>
-              </div>
-            ))
-          )}
+          {gameState.community_cards && gameState.community_cards.length > 0
+            ? gameState.community_cards.map((card: any, i: number) => (
+                <motion.div
+                  key={card.id || i}
+                  initial={{ opacity: 0, rotateY: 180 }}
+                  animate={{ opacity: 1, rotateY: 0 }}
+                  transition={{ delay: i * 0.15, duration: 0.3 }}
+                  className="w-16 h-24 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-center shadow-lg"
+                >
+                  <span className={`text-xl font-bold ${suitColor[card.suit]}`}>
+                    {card.rank}
+                  </span>
+                  <span className={`text-2xl ${suitColor[card.suit]}`}>
+                    {suitSymbol[card.suit]}
+                  </span>
+                </motion.div>
+              ))
+            : Array.from({ length: 5 }, (_, i) => (
+                <div
+                  key={i}
+                  className="w-16 h-24 bg-gray-700 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center"
+                >
+                  <span className="text-gray-500 text-xs">?</span>
+                </div>
+              ))}
         </div>
       </div>
 
@@ -574,58 +633,88 @@ const ActiveGameView: React.FC<{
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
         {gameState.players?.map((player: any, idx: number) => {
           const isMe = player.user_id === user?.id;
-          const isActive = gameState.current_player === idx && gameState.phase !== "finished" && gameState.phase !== "showdown";
-          const showCards = isMe || gameState.phase === "showdown" || gameState.phase === "finished";
+          const isActive =
+            gameState.current_player === idx &&
+            gameState.phase !== "finished" &&
+            gameState.phase !== "showdown";
+          const showCards =
+            isMe ||
+            gameState.phase === "showdown" ||
+            gameState.phase === "finished";
 
           return (
             <motion.div
               key={player.user_id}
               className={`bg-gray-800 border-2 rounded-xl p-4 ${
-                isActive ? "border-yellow-400 shadow-lg shadow-yellow-400/20" :
-                player.has_folded ? "border-red-900 opacity-50" :
-                isMe ? "border-blue-500" : "border-gray-700"
+                isActive
+                  ? "border-yellow-400 shadow-lg shadow-yellow-400/20"
+                  : player.has_folded
+                    ? "border-red-900 opacity-50"
+                    : isMe
+                      ? "border-blue-500"
+                      : "border-gray-700"
               }`}
               animate={isActive ? { scale: [1, 1.02, 1] } : {}}
               transition={{ duration: 1, repeat: isActive ? Infinity : 0 }}
             >
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-sm font-semibold truncate ${isMe ? "text-blue-400" : "text-white"}`}>
+                <span
+                  className={`text-sm font-semibold truncate ${isMe ? "text-blue-400" : "text-white"}`}
+                >
                   {isMe ? "You" : getPlayerDisplayName(player.user_id)}
                 </span>
-                {isActive && <span className="w-2 h-2 bg-yellow-400 rounded-full animate-ping"></span>}
+                {isActive && (
+                  <span className="w-2 h-2 bg-yellow-400 rounded-full animate-ping"></span>
+                )}
               </div>
 
               {/* Cards */}
               <div className="flex gap-1 mb-2 justify-center">
-                {player.cards && player.cards.length > 0 ? (
-                  showCards ? (
-                    player.cards.map((card: any, ci: number) => (
-                      <div key={ci} className="w-12 h-18 bg-white rounded border border-gray-300 flex flex-col items-center justify-center p-1">
-                        <span className={`text-sm font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
-                        <span className={`text-lg ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
-                      </div>
-                    ))
-                  ) : (
-                    player.cards.map((_: any, ci: number) => (
-                      <div key={ci} className="w-12 h-18 bg-gradient-to-br from-blue-900 to-blue-700 rounded border-2 border-blue-600 flex items-center justify-center">
-                        <div className="w-6 h-6 bg-blue-600 rounded-full opacity-50"></div>
-                      </div>
-                    ))
-                  )
-                ) : null}
+                {player.cards && player.cards.length > 0
+                  ? showCards
+                    ? player.cards.map((card: any, ci: number) => (
+                        <div
+                          key={ci}
+                          className="w-12 h-18 bg-white rounded border border-gray-300 flex flex-col items-center justify-center p-1"
+                        >
+                          <span
+                            className={`text-sm font-bold ${suitColor[card.suit]}`}
+                          >
+                            {card.rank}
+                          </span>
+                          <span className={`text-lg ${suitColor[card.suit]}`}>
+                            {suitSymbol[card.suit]}
+                          </span>
+                        </div>
+                      ))
+                    : player.cards.map((_: any, ci: number) => (
+                        <div
+                          key={ci}
+                          className="w-12 h-18 bg-gradient-to-br from-blue-900 to-blue-700 rounded border-2 border-blue-600 flex items-center justify-center"
+                        >
+                          <div className="w-6 h-6 bg-blue-600 rounded-full opacity-50"></div>
+                        </div>
+                      ))
+                  : null}
               </div>
 
               {/* Player info */}
               <div className="text-center space-y-1">
-                <div className="text-yellow-300 text-xs font-semibold">{player.chip_count} chips</div>
+                <div className="text-yellow-300 text-xs font-semibold">
+                  {player.chip_count} chips
+                </div>
                 {player.current_bet > 0 && (
-                  <div className="text-orange-400 text-xs">Bet: {player.current_bet}</div>
+                  <div className="text-orange-400 text-xs">
+                    Bet: {player.current_bet}
+                  </div>
                 )}
                 {player.has_folded && (
                   <div className="text-red-400 text-xs font-bold">FOLDED</div>
                 )}
                 {player.is_all_in && (
-                  <div className="text-purple-400 text-xs font-bold">ALL IN</div>
+                  <div className="text-purple-400 text-xs font-bold">
+                    ALL IN
+                  </div>
                 )}
               </div>
             </motion.div>
@@ -646,8 +735,12 @@ const ActiveGameView: React.FC<{
                 transition={{ delay: i * 0.2 }}
                 className="w-20 h-28 bg-white rounded-lg border-2 border-blue-400 flex flex-col items-center justify-center shadow-xl"
               >
-                <span className={`text-2xl font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
-                <span className={`text-3xl ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
+                <span className={`text-2xl font-bold ${suitColor[card.suit]}`}>
+                  {card.rank}
+                </span>
+                <span className={`text-3xl ${suitColor[card.suit]}`}>
+                  {suitSymbol[card.suit]}
+                </span>
               </motion.div>
             ))}
           </div>
@@ -661,7 +754,9 @@ const ActiveGameView: React.FC<{
           animate={{ y: 0, opacity: 1 }}
           className="bg-gray-800 border border-yellow-600 rounded-xl p-6"
         >
-          <h3 className="text-center text-yellow-400 font-semibold mb-4">Your Action</h3>
+          <h3 className="text-center text-yellow-400 font-semibold mb-4">
+            Your Action
+          </h3>
           <div className="flex flex-wrap justify-center gap-3">
             <button
               onClick={() => makeMove("fold")}
@@ -690,7 +785,9 @@ const ActiveGameView: React.FC<{
               <input
                 type="number"
                 value={raiseAmount || minRaise}
-                onChange={(e) => setRaiseAmount(parseInt(e.target.value) || minRaise)}
+                onChange={(e) =>
+                  setRaiseAmount(parseInt(e.target.value) || minRaise)
+                }
                 min={minRaise}
                 max={myPlayer.chip_count + myPlayer.current_bet}
                 className="w-24 px-3 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white text-center"
@@ -704,7 +801,9 @@ const ActiveGameView: React.FC<{
             </div>
 
             <button
-              onClick={() => makeMove("raise", myPlayer.chip_count + myPlayer.current_bet)}
+              onClick={() =>
+                makeMove("raise", myPlayer.chip_count + myPlayer.current_bet)
+              }
               className="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-500 transition-colors"
             >
               All In ({myPlayer.chip_count})
@@ -714,30 +813,151 @@ const ActiveGameView: React.FC<{
       )}
 
       {/* Waiting for opponent */}
-      {!isMyTurn && gameState.phase !== "finished" && gameState.phase !== "showdown" && myPlayer && !myPlayer.has_folded && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 text-center">
-          <p className="text-gray-400">
-            Waiting for <span className="text-yellow-400 font-semibold">{getPlayerDisplayName(gameState.players[gameState.current_player]?.user_id)}</span> to act...
-          </p>
-        </div>
-      )}
+      {!isMyTurn &&
+        gameState.phase !== "finished" &&
+        gameState.phase !== "showdown" &&
+        myPlayer &&
+        !myPlayer.has_folded && (
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 text-center">
+            <p className="text-gray-400">
+              Waiting for{" "}
+              <span className="text-yellow-400 font-semibold">
+                {getPlayerDisplayName(
+                  gameState.players[gameState.current_player]?.user_id,
+                )}
+              </span>{" "}
+              to act...
+            </p>
+          </div>
+        )}
 
       {/* Game Over */}
       {(gameState.phase === "finished" || gameState.phase === "showdown") && (
-        <div className="bg-gray-800 border border-green-600 rounded-xl p-6 text-center">
-          <h3 className="text-xl font-bold text-green-400 mb-2">Hand Complete!</h3>
-          <div className="space-y-2">
-            {gameState.players?.map((p: any) => (
-              <div key={p.user_id} className="text-gray-300">
-                <span className={p.user_id === user?.id ? "text-blue-400" : "text-white"}>
-                  {p.user_id === user?.id ? "You" : getPlayerDisplayName(p.user_id)}
-                </span>
-                : {p.chip_count} chips
-                {p.has_folded && <span className="text-red-400 ml-2">(folded)</span>}
-              </div>
-            ))}
+        <div className="space-y-4">
+          {/* Winner Banner */}
+          {gameState.result && (
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 200 }}
+              className="bg-gradient-to-r from-yellow-900/50 via-yellow-700/30 to-yellow-900/50 border-2 border-yellow-500 rounded-xl p-6 text-center"
+            >
+              <motion.div
+                animate={{ rotate: [0, -3, 3, -3, 0] }}
+                transition={{ duration: 0.5, delay: 0.3 }}
+                className="text-4xl mb-2"
+              >
+                🏆
+              </motion.div>
+              <h3 className="text-2xl font-bold text-yellow-400 mb-1">
+                {gameState.result.winners.length > 1 ? "Split Pot!" : "Winner!"}
+              </h3>
+              {gameState.result.winners.map((w: any) => (
+                <div key={w.user_id} className="mb-2">
+                  <p className="text-xl font-semibold text-white">
+                    {w.user_id === user?.id ? "🎉 You won!" : `${getPlayerDisplayName(w.user_id)} wins!`}
+                  </p>
+                  <p className="text-yellow-300 text-sm">
+                    with <span className="font-bold">{w.hand_description}</span>
+                  </p>
+                  <motion.p
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    transition={{ delay: 0.5 }}
+                    className="text-green-400 text-lg font-bold mt-1"
+                  >
+                    +{w.chips_won} chips
+                  </motion.p>
+                </div>
+              ))}
+            </motion.div>
+          )}
+
+          {/* All Players Results */}
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
+            <h4 className="text-sm text-gray-400 font-semibold mb-3 uppercase tracking-wide">
+              Round Results
+            </h4>
+            <div className="space-y-3">
+              {gameState.players?.map((p: any) => {
+                const isWinner = gameState.result?.winners.some((w: any) => w.user_id === p.user_id);
+                const resultInfo = isWinner
+                  ? gameState.result?.winners.find((w: any) => w.user_id === p.user_id)
+                  : gameState.result?.losers.find((l: any) => l.user_id === p.user_id);
+
+                return (
+                  <motion.div
+                    key={p.user_id}
+                    initial={{ x: -20, opacity: 0 }}
+                    animate={{ x: 0, opacity: 1 }}
+                    className={`flex items-center justify-between p-3 rounded-lg ${
+                      isWinner ? "bg-yellow-900/30 border border-yellow-600/50" : "bg-gray-700/50"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      {isWinner && <span className="text-xl">👑</span>}
+                      {!isWinner && p.has_folded && <span className="text-xl">🏳️</span>}
+                      {!isWinner && !p.has_folded && <span className="text-xl">💀</span>}
+                      <div>
+                        <p className={`font-semibold ${p.user_id === user?.id ? "text-blue-400" : "text-white"}`}>
+                          {p.user_id === user?.id ? "You" : getPlayerDisplayName(p.user_id)}
+                        </p>
+                        <p className="text-xs text-gray-400">
+                          {resultInfo?.hand_description || (p.has_folded ? "Folded" : "—")}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className={`font-bold ${isWinner ? "text-green-400" : "text-gray-300"}`}>
+                        {p.chip_count} chips
+                      </p>
+                      {isWinner && resultInfo && (
+                        <p className="text-green-400 text-xs">+{resultInfo.chips_won}</p>
+                      )}
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
           </div>
-          <p className="text-gray-500 text-sm mt-4">A new hand will start when the host starts another game.</p>
+
+          {/* Revealed Cards */}
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
+            <h4 className="text-sm text-gray-400 font-semibold mb-3 uppercase tracking-wide">
+              Revealed Hands
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {gameState.players?.filter((p: any) => !p.has_folded).map((p: any) => (
+                <div key={p.user_id} className="flex items-center gap-3 p-3 bg-gray-700/50 rounded-lg">
+                  <span className={`text-sm font-semibold ${p.user_id === user?.id ? "text-blue-400" : "text-white"}`}>
+                    {p.user_id === user?.id ? "You" : getPlayerDisplayName(p.user_id)}:
+                  </span>
+                  <div className="flex gap-1">
+                    {p.cards?.map((card: any, i: number) => (
+                      <div key={i} className="w-10 h-14 bg-white rounded border border-gray-300 flex flex-col items-center justify-center">
+                        <span className={`text-xs font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
+                        <span className={`text-sm ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Deal Next Hand Button */}
+          <div className="text-center">
+            {isHost ? (
+              <button
+                onClick={() => dealNextHand()}
+                className="px-8 py-4 bg-gradient-to-r from-yellow-600 to-yellow-500 text-black rounded-xl font-bold text-lg hover:from-yellow-500 hover:to-yellow-400 transition-all shadow-lg shadow-yellow-600/30"
+              >
+                🃏 Deal Next Hand
+              </button>
+            ) : (
+              <p className="text-gray-400 text-sm">Waiting for host to deal the next hand...</p>
+            )}
+          </div>
         </div>
       )}
     </div>
