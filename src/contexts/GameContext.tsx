@@ -7,8 +7,9 @@ import React, {
   useCallback,
 } from "react";
 import { supabase } from "../lib/supabase";
-import { Room, RoomPlayer, Game, User } from "../types";
+import { Room, RoomPlayer, Game, User, PokerGameState, Card } from "../types";
 import { useAuth } from "./AuthContext";
+import { createDeck, shuffleDeck, dealCards, calculatePokerHandRank } from "../utils/cardUtils";
 import toast from "react-hot-toast";
 
 interface GameContextType {
@@ -30,6 +31,7 @@ interface GameContextType {
   fetchRooms: () => Promise<void>;
   fetchRoomDetails: (roomId: string) => Promise<void>;
   startGame: (roomId: string) => Promise<boolean>;
+  makeMove: (action: "fold" | "call" | "raise" | "check", amount?: number) => Promise<boolean>;
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
@@ -474,97 +476,327 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const startGame = async (roomId: string): Promise<boolean> => {
-    console.log("startGame called with roomId:", roomId);
-    console.log("startGame: user exists?", !!user);
+  // Helper: advance poker phase (flop, turn, river, showdown)
+  const advancePhase = (state: PokerGameState) => {
+    // Reset for next betting round
+    state.players.forEach((p) => {
+      if (!p.has_folded) {
+        p.has_acted = false;
+        p.current_bet = 0;
+      }
+    });
+    state.current_bet = 0;
 
-    if (!user) {
-      console.log("startGame: No user, returning false");
-      return false;
+    // Find first active player after dealer for next round
+    const findFirstActive = () => {
+      for (let i = 0; i < state.players.length; i++) {
+        const idx = (state.dealer_position + 1 + i) % state.players.length;
+        if (!state.players[idx].has_folded && !state.players[idx].is_all_in) {
+          return idx;
+        }
+      }
+      return 0;
+    };
+
+    switch (state.phase) {
+      case "preflop": {
+        const { cards, remaining } = dealCards(state.deck, 3);
+        state.community_cards = cards;
+        state.deck = remaining;
+        state.phase = "flop";
+        state.current_player = findFirstActive();
+        break;
+      }
+      case "flop": {
+        const { cards, remaining } = dealCards(state.deck, 1);
+        state.community_cards.push(cards[0]);
+        state.deck = remaining;
+        state.phase = "turn";
+        state.current_player = findFirstActive();
+        break;
+      }
+      case "turn": {
+        const { cards, remaining } = dealCards(state.deck, 1);
+        state.community_cards.push(cards[0]);
+        state.deck = remaining;
+        state.phase = "river";
+        state.current_player = findFirstActive();
+        break;
+      }
+      case "river": {
+        state.phase = "showdown";
+        determineWinner(state);
+        break;
+      }
     }
 
+    // If all remaining players are all-in, run out the board
+    const activePlayers = state.players.filter(
+      (p) => !p.has_folded && !p.is_all_in,
+    );
+    if (activePlayers.length <= 1 && state.phase !== "showdown" && state.phase !== "finished") {
+      while (state.community_cards.length < 5) {
+        const { cards, remaining } = dealCards(state.deck, 1);
+        state.community_cards.push(cards[0]);
+        state.deck = remaining;
+      }
+      state.phase = "showdown";
+      determineWinner(state);
+    }
+  };
+
+  // Helper: determine winner at showdown
+  const determineWinner = (state: PokerGameState) => {
+    const nonFolded = state.players.filter((p) => !p.has_folded);
+    if (nonFolded.length === 1) {
+      nonFolded[0].chip_count += state.pot;
+    } else {
+      const hands = nonFolded.map((p) => ({
+        player: p,
+        rank: calculatePokerHandRank([...p.cards, ...state.community_cards]),
+      }));
+      const bestRank = Math.max(...hands.map((h) => h.rank.rank));
+      const winners = hands.filter((h) => h.rank.rank === bestRank);
+      const share = Math.floor(state.pot / winners.length);
+      winners.forEach((w) => {
+        w.player.chip_count += share;
+      });
+    }
+    state.pot = 0;
+    state.phase = "finished";
+  };
+
+  const startGame = async (roomId: string): Promise<boolean> => {
+    if (!user) return false;
+
     try {
-      console.log("startGame: Setting loading to true");
       setLoading(true);
 
-      // Check if enough players are ready
-      console.log("startGame: Checking ready players...");
       const { data: readyPlayers, error: playersError } = await supabase
         .from("room_players")
         .select("*")
         .eq("room_id", roomId)
-        .eq("is_ready", true);
-
-      console.log("startGame: Ready players:", readyPlayers?.length || 0);
+        .eq("is_ready", true)
+        .order("seat_index");
 
       if (playersError || !readyPlayers || readyPlayers.length < 2) {
-        console.error("startGame: Not enough ready players");
         toast.error("Need at least 2 ready players to start");
         return false;
       }
 
       // Update room status to playing
-      console.log("startGame: Updating room status to playing...");
       const { error: roomUpdateError } = await supabase
         .from("rooms")
-        .update({
-          status: "playing",
-          started_at: new Date().toISOString(),
-        })
+        .update({ status: "playing", started_at: new Date().toISOString() })
         .eq("id", roomId)
-        .eq("status", "waiting"); // Only update if still waiting
+        .eq("status", "waiting");
 
       if (roomUpdateError) {
-        console.error("startGame: Error updating room:", roomUpdateError);
         toast.error("Failed to start game");
         return false;
       }
 
-      // Create a basic game record
-      console.log("startGame: Creating game record...");
-      const basicGameState = {
-        type: currentRoom?.game_type || "poker",
+      // Initialize proper poker game state
+      const deck = shuffleDeck(createDeck());
+      const minBet = currentRoom?.min_bet || 10;
+      const smallBlind = Math.floor(minBet / 2);
+      const bigBlind = minBet;
+
+      const players = readyPlayers.map((p, i) => ({
+        user_id: p.user_id,
+        seat_index: p.seat_index,
+        cards: [] as Card[],
+        chip_count: p.chip_count,
+        current_bet: 0,
+        has_acted: false,
+        has_folded: false,
+        is_all_in: false,
+      }));
+
+      // Deal hole cards (2 per player)
+      let currentDeck = deck;
+      for (let round = 0; round < 2; round++) {
+        for (const player of players) {
+          const { cards, remaining } = dealCards(currentDeck, 1);
+          player.cards.push(cards[0]);
+          currentDeck = remaining;
+        }
+      }
+
+      // Post blinds
+      const sbIndex = 0; // First player posts small blind
+      const bbIndex = 1; // Second player posts big blind
+
+      const sbAmount = Math.min(smallBlind, players[sbIndex].chip_count);
+      players[sbIndex].current_bet = sbAmount;
+      players[sbIndex].chip_count -= sbAmount;
+
+      const bbAmount = Math.min(bigBlind, players[bbIndex].chip_count);
+      players[bbIndex].current_bet = bbAmount;
+      players[bbIndex].chip_count -= bbAmount;
+
+      // First to act is player after big blind (or small blind in heads-up)
+      const firstToAct = players.length === 2 ? 0 : 2 % players.length;
+
+      const gameState: PokerGameState = {
+        type: "poker",
         phase: "preflop",
-        pot: 0,
-        current_player: 0,
-        status: "active",
-        players: readyPlayers.map((p) => ({
-          user_id: p.user_id,
-          seat_index: p.seat_index,
-          chip_count: p.chip_count,
-          current_bet: 0,
-          has_acted: false,
-          has_folded: false,
-          is_all_in: false,
-        })),
-        created_at: new Date().toISOString(),
+        deck: currentDeck,
+        community_cards: [],
+        pot: sbAmount + bbAmount,
+        current_bet: bbAmount,
+        dealer_position: 0,
+        current_player: firstToAct,
+        small_blind: smallBlind,
+        big_blind: bigBlind,
+        players,
       };
 
-      const { data: gameData, error: gameError } = await supabase
+      const { error: gameError } = await supabase
         .from("games")
-        .insert({
-          room_id: roomId,
-          game_state: basicGameState,
-        })
+        .insert({ room_id: roomId, game_state: gameState })
         .select()
         .single();
 
       if (gameError) {
-        console.error("startGame: Error creating game:", gameError);
         toast.error("Failed to create game");
         return false;
       }
 
-      console.log("startGame: Game started successfully!", gameData);
-      toast.success("Game started!");
+      toast.success("Game started! Cards are dealt.");
       return true;
     } catch (error) {
       console.error("Error starting game:", error);
       toast.error("Failed to start game");
       return false;
     } finally {
-      console.log("startGame: Setting loading to false");
       setLoading(false);
+    }
+  };
+
+  const makeMove = async (
+    action: "fold" | "call" | "raise" | "check",
+    amount?: number,
+  ): Promise<boolean> => {
+    if (!user || !currentGame) return false;
+
+    try {
+      const gameState = currentGame.game_state as PokerGameState;
+      const playerIndex = gameState.players.findIndex(
+        (p) => p.user_id === user.id,
+      );
+
+      if (playerIndex === -1) {
+        toast.error("You are not in this game");
+        return false;
+      }
+
+      if (gameState.current_player !== playerIndex) {
+        toast.error("It's not your turn");
+        return false;
+      }
+
+      const player = gameState.players[playerIndex];
+      if (player.has_folded) return false;
+
+      // Clone state for mutation
+      const newState: PokerGameState = JSON.parse(JSON.stringify(gameState));
+      const currentPlayer = newState.players[playerIndex];
+
+      switch (action) {
+        case "fold":
+          currentPlayer.has_folded = true;
+          break;
+        case "check":
+          if (newState.current_bet > currentPlayer.current_bet) {
+            toast.error("You can't check, you need to call or raise");
+            return false;
+          }
+          break;
+        case "call": {
+          const callAmount = newState.current_bet - currentPlayer.current_bet;
+          const actualCall = Math.min(callAmount, currentPlayer.chip_count);
+          currentPlayer.current_bet += actualCall;
+          currentPlayer.chip_count -= actualCall;
+          newState.pot += actualCall;
+          if (currentPlayer.chip_count === 0) currentPlayer.is_all_in = true;
+          break;
+        }
+        case "raise": {
+          const raiseTotal = amount || newState.current_bet * 2;
+          const raiseAmount = raiseTotal - currentPlayer.current_bet;
+          const actualRaise = Math.min(raiseAmount, currentPlayer.chip_count);
+          currentPlayer.current_bet += actualRaise;
+          currentPlayer.chip_count -= actualRaise;
+          newState.pot += actualRaise;
+          newState.current_bet = currentPlayer.current_bet;
+          if (currentPlayer.chip_count === 0) currentPlayer.is_all_in = true;
+          // Reset has_acted for other players since there's a new bet to respond to
+          newState.players.forEach((p, i) => {
+            if (i !== playerIndex && !p.has_folded && !p.is_all_in) {
+              p.has_acted = false;
+            }
+          });
+          break;
+        }
+      }
+
+      currentPlayer.has_acted = true;
+
+      // Check if round is complete
+      const activePlayers = newState.players.filter(
+        (p) => !p.has_folded && !p.is_all_in,
+      );
+      const allInPlayers = newState.players.filter(
+        (p) => !p.has_folded && p.is_all_in,
+      );
+      const nonFoldedPlayers = newState.players.filter((p) => !p.has_folded);
+
+      // Check if only one player remains (everyone else folded)
+      if (nonFoldedPlayers.length === 1) {
+        // Winner by fold
+        const winner = nonFoldedPlayers[0];
+        winner.chip_count += newState.pot;
+        newState.pot = 0;
+        newState.phase = "finished";
+      } else if (
+        activePlayers.every((p) => p.has_acted) &&
+        activePlayers.every(
+          (p) => p.current_bet === newState.current_bet || p.is_all_in,
+        )
+      ) {
+        // Advance to next phase
+        advancePhase(newState);
+      } else {
+        // Move to next active player
+        let next = (playerIndex + 1) % newState.players.length;
+        while (
+          newState.players[next].has_folded ||
+          newState.players[next].is_all_in
+        ) {
+          next = (next + 1) % newState.players.length;
+        }
+        newState.current_player = next;
+      }
+
+      // Save to database
+      const { error } = await supabase
+        .from("games")
+        .update({ game_state: newState })
+        .eq("id", currentGame.id);
+
+      if (error) {
+        toast.error("Failed to save move");
+        return false;
+      }
+
+      // Optimistic update
+      setCurrentGame({ ...currentGame, game_state: newState });
+      return true;
+    } catch (error) {
+      console.error("Error making move:", error);
+      toast.error("Failed to make move");
+      return false;
     }
   };
 
@@ -588,6 +820,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     fetchRooms,
     fetchRoomDetails,
     startGame,
+    makeMove,
   };
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;

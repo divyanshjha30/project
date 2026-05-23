@@ -30,11 +30,13 @@ const GameRoom: React.FC = () => {
     leaveRoom,
     toggleReady,
     startGame,
+    makeMove,
     loading,
   } = useGame();
 
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
+  const [raiseAmount, setRaiseAmount] = useState(0);
 
   useEffect(() => {
     if (roomId) {
@@ -369,34 +371,15 @@ const GameRoom: React.FC = () => {
           </div>
         ) : (
           // Active game view
-          <div className="max-w-7xl mx-auto">
-            <GameTable
-              players={roomPlayers}
-              gameType={currentRoom.game_type}
-              currentPlayer={0} // This would come from game state
-              pot={currentGame ? (currentGame.game_state as any).pot : 0}
-              communityCards={
-                currentGame
-                  ? (currentGame.game_state as any).community_cards
-                  : []
-              }
-            />
-
-            {/* Game controls for active game */}
-            <div className="mt-6 bg-gray-800 border border-gray-700 rounded-2xl p-6">
-              <div className="flex justify-center space-x-4">
-                <button className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors">
-                  Fold
-                </button>
-                <button className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-colors">
-                  Call
-                </button>
-                <button className="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-500 transition-colors">
-                  Raise
-                </button>
-              </div>
-            </div>
-          </div>
+          <ActiveGameView
+            currentGame={currentGame}
+            currentRoom={currentRoom}
+            user={user}
+            makeMove={makeMove}
+            raiseAmount={raiseAmount}
+            setRaiseAmount={setRaiseAmount}
+            roomPlayers={roomPlayers}
+          />
         )}
       </div>
 
@@ -500,6 +483,263 @@ const GameRoom: React.FC = () => {
           </div>
         )}
       </AnimatePresence>
+    </div>
+  );
+};
+
+// Active Game View Component
+const ActiveGameView: React.FC<{
+  currentGame: any;
+  currentRoom: any;
+  user: any;
+  makeMove: (action: "fold" | "call" | "raise" | "check", amount?: number) => Promise<boolean>;
+  raiseAmount: number;
+  setRaiseAmount: (n: number) => void;
+  roomPlayers: any[];
+}> = ({ currentGame, currentRoom, user, makeMove, raiseAmount, setRaiseAmount, roomPlayers }) => {
+  if (!currentGame?.game_state) {
+    return (
+      <div className="max-w-4xl mx-auto text-center py-20">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-yellow-400 mx-auto mb-4"></div>
+        <p className="text-gray-400">Loading game state...</p>
+      </div>
+    );
+  }
+
+  const gameState = currentGame.game_state as any;
+  const myPlayerIndex = gameState.players?.findIndex((p: any) => p.user_id === user?.id) ?? -1;
+  const myPlayer = myPlayerIndex >= 0 ? gameState.players[myPlayerIndex] : null;
+  const isMyTurn = gameState.current_player === myPlayerIndex && gameState.phase !== "finished" && gameState.phase !== "showdown";
+  const canCheck = isMyTurn && (gameState.current_bet === 0 || (myPlayer && myPlayer.current_bet === gameState.current_bet));
+  const callAmount = myPlayer ? gameState.current_bet - myPlayer.current_bet : 0;
+  const minRaise = gameState.current_bet * 2 || gameState.big_blind * 2;
+
+  const getPlayerDisplayName = (userId: string) => {
+    const rp = roomPlayers.find((p: any) => p.user_id === userId);
+    return rp?.user?.display_name || userId.slice(0, 8);
+  };
+
+  const suitSymbol: Record<string, string> = { hearts: "♥", diamonds: "♦", clubs: "♣", spades: "♠" };
+  const suitColor: Record<string, string> = { hearts: "text-red-500", diamonds: "text-red-500", clubs: "text-white", spades: "text-white" };
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-6">
+      {/* Game Info Bar */}
+      <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl p-4">
+        <div className="flex items-center space-x-6">
+          <span className="text-gray-400 text-sm">Phase: <span className="text-yellow-400 font-semibold uppercase">{gameState.phase}</span></span>
+          <span className="text-gray-400 text-sm">Pot: <span className="text-yellow-400 font-semibold">{gameState.pot} chips</span></span>
+          <span className="text-gray-400 text-sm">Blinds: <span className="text-white">{gameState.small_blind}/{gameState.big_blind}</span></span>
+        </div>
+        {isMyTurn && (
+          <span className="bg-yellow-600 text-black px-3 py-1 rounded-full text-sm font-bold animate-pulse">
+            YOUR TURN
+          </span>
+        )}
+        {gameState.phase === "finished" && (
+          <span className="bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold">
+            HAND COMPLETE
+          </span>
+        )}
+      </div>
+
+      {/* Community Cards */}
+      <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+        <h3 className="text-sm text-gray-400 mb-3 text-center">Community Cards</h3>
+        <div className="flex justify-center gap-3">
+          {gameState.community_cards && gameState.community_cards.length > 0 ? (
+            gameState.community_cards.map((card: any, i: number) => (
+              <motion.div
+                key={card.id || i}
+                initial={{ opacity: 0, rotateY: 180 }}
+                animate={{ opacity: 1, rotateY: 0 }}
+                transition={{ delay: i * 0.15, duration: 0.3 }}
+                className="w-16 h-24 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-center shadow-lg"
+              >
+                <span className={`text-xl font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
+                <span className={`text-2xl ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
+              </motion.div>
+            ))
+          ) : (
+            Array.from({ length: 5 }, (_, i) => (
+              <div key={i} className="w-16 h-24 bg-gray-700 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center">
+                <span className="text-gray-500 text-xs">?</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Players */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+        {gameState.players?.map((player: any, idx: number) => {
+          const isMe = player.user_id === user?.id;
+          const isActive = gameState.current_player === idx && gameState.phase !== "finished" && gameState.phase !== "showdown";
+          const showCards = isMe || gameState.phase === "showdown" || gameState.phase === "finished";
+
+          return (
+            <motion.div
+              key={player.user_id}
+              className={`bg-gray-800 border-2 rounded-xl p-4 ${
+                isActive ? "border-yellow-400 shadow-lg shadow-yellow-400/20" :
+                player.has_folded ? "border-red-900 opacity-50" :
+                isMe ? "border-blue-500" : "border-gray-700"
+              }`}
+              animate={isActive ? { scale: [1, 1.02, 1] } : {}}
+              transition={{ duration: 1, repeat: isActive ? Infinity : 0 }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className={`text-sm font-semibold truncate ${isMe ? "text-blue-400" : "text-white"}`}>
+                  {isMe ? "You" : getPlayerDisplayName(player.user_id)}
+                </span>
+                {isActive && <span className="w-2 h-2 bg-yellow-400 rounded-full animate-ping"></span>}
+              </div>
+
+              {/* Cards */}
+              <div className="flex gap-1 mb-2 justify-center">
+                {player.cards && player.cards.length > 0 ? (
+                  showCards ? (
+                    player.cards.map((card: any, ci: number) => (
+                      <div key={ci} className="w-12 h-18 bg-white rounded border border-gray-300 flex flex-col items-center justify-center p-1">
+                        <span className={`text-sm font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
+                        <span className={`text-lg ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
+                      </div>
+                    ))
+                  ) : (
+                    player.cards.map((_: any, ci: number) => (
+                      <div key={ci} className="w-12 h-18 bg-gradient-to-br from-blue-900 to-blue-700 rounded border-2 border-blue-600 flex items-center justify-center">
+                        <div className="w-6 h-6 bg-blue-600 rounded-full opacity-50"></div>
+                      </div>
+                    ))
+                  )
+                ) : null}
+              </div>
+
+              {/* Player info */}
+              <div className="text-center space-y-1">
+                <div className="text-yellow-300 text-xs font-semibold">{player.chip_count} chips</div>
+                {player.current_bet > 0 && (
+                  <div className="text-orange-400 text-xs">Bet: {player.current_bet}</div>
+                )}
+                {player.has_folded && (
+                  <div className="text-red-400 text-xs font-bold">FOLDED</div>
+                )}
+                {player.is_all_in && (
+                  <div className="text-purple-400 text-xs font-bold">ALL IN</div>
+                )}
+              </div>
+            </motion.div>
+          );
+        })}
+      </div>
+
+      {/* My Cards (larger display) */}
+      {myPlayer && !myPlayer.has_folded && (
+        <div className="bg-gray-800 border border-blue-500 rounded-xl p-4">
+          <h3 className="text-sm text-blue-400 mb-2 text-center">Your Hand</h3>
+          <div className="flex justify-center gap-4">
+            {myPlayer.cards?.map((card: any, i: number) => (
+              <motion.div
+                key={card.id || i}
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ delay: i * 0.2 }}
+                className="w-20 h-28 bg-white rounded-lg border-2 border-blue-400 flex flex-col items-center justify-center shadow-xl"
+              >
+                <span className={`text-2xl font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
+                <span className={`text-3xl ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
+              </motion.div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Action Controls */}
+      {isMyTurn && myPlayer && !myPlayer.has_folded && (
+        <motion.div
+          initial={{ y: 20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          className="bg-gray-800 border border-yellow-600 rounded-xl p-6"
+        >
+          <h3 className="text-center text-yellow-400 font-semibold mb-4">Your Action</h3>
+          <div className="flex flex-wrap justify-center gap-3">
+            <button
+              onClick={() => makeMove("fold")}
+              className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors"
+            >
+              Fold
+            </button>
+
+            {canCheck ? (
+              <button
+                onClick={() => makeMove("check")}
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-colors"
+              >
+                Check
+              </button>
+            ) : (
+              <button
+                onClick={() => makeMove("call")}
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-colors"
+              >
+                Call ({callAmount})
+              </button>
+            )}
+
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={raiseAmount || minRaise}
+                onChange={(e) => setRaiseAmount(parseInt(e.target.value) || minRaise)}
+                min={minRaise}
+                max={myPlayer.chip_count + myPlayer.current_bet}
+                className="w-24 px-3 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white text-center"
+              />
+              <button
+                onClick={() => makeMove("raise", raiseAmount || minRaise)}
+                className="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-500 transition-colors"
+              >
+                Raise
+              </button>
+            </div>
+
+            <button
+              onClick={() => makeMove("raise", myPlayer.chip_count + myPlayer.current_bet)}
+              className="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-500 transition-colors"
+            >
+              All In ({myPlayer.chip_count})
+            </button>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Waiting for opponent */}
+      {!isMyTurn && gameState.phase !== "finished" && gameState.phase !== "showdown" && myPlayer && !myPlayer.has_folded && (
+        <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 text-center">
+          <p className="text-gray-400">
+            Waiting for <span className="text-yellow-400 font-semibold">{getPlayerDisplayName(gameState.players[gameState.current_player]?.user_id)}</span> to act...
+          </p>
+        </div>
+      )}
+
+      {/* Game Over */}
+      {(gameState.phase === "finished" || gameState.phase === "showdown") && (
+        <div className="bg-gray-800 border border-green-600 rounded-xl p-6 text-center">
+          <h3 className="text-xl font-bold text-green-400 mb-2">Hand Complete!</h3>
+          <div className="space-y-2">
+            {gameState.players?.map((p: any) => (
+              <div key={p.user_id} className="text-gray-300">
+                <span className={p.user_id === user?.id ? "text-blue-400" : "text-white"}>
+                  {p.user_id === user?.id ? "You" : getPlayerDisplayName(p.user_id)}
+                </span>
+                : {p.chip_count} chips
+                {p.has_folded && <span className="text-red-400 ml-2">(folded)</span>}
+              </div>
+            ))}
+          </div>
+          <p className="text-gray-500 text-sm mt-4">A new hand will start when the host starts another game.</p>
+        </div>
+      )}
     </div>
   );
 };
