@@ -96,7 +96,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   useEffect(() => {
     let isMounted = true;
+    let authResolved = false;
     console.log("AuthContext: Initializing auth...");
+
+    // Safety timeout in case something goes wrong
+    const safetyTimeout = setTimeout(() => {
+      if (isMounted && !authResolved) {
+        console.warn("AuthContext: Safety timeout triggered, stopping loading");
+        setLoading(false);
+      }
+    }, 5000);
 
     // Listen for auth changes - this fires synchronously on init with current session
     const {
@@ -112,39 +121,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         setTimeout(async () => {
           if (!isMounted) return;
           try {
-            console.log("AuthContext: Fetching user profile for:", session.user.id);
             const userProfile = await fetchUserProfile(session.user.id);
             if (isMounted) {
-              console.log("AuthContext: User profile loaded:", !!userProfile);
               setUser(userProfile);
+              authResolved = true;
+              clearTimeout(safetyTimeout);
               setLoading(false);
             }
           } catch (error) {
             console.error("AuthContext: Error fetching profile:", error);
-            if (isMounted) setLoading(false);
+            if (isMounted) {
+              authResolved = true;
+              clearTimeout(safetyTimeout);
+              setLoading(false);
+            }
           }
         }, 0);
       } else if (event === "SIGNED_OUT") {
-        console.log("AuthContext: User signed out");
         setSupabaseUser(null);
         setUser(null);
+        authResolved = true;
+        clearTimeout(safetyTimeout);
         setLoading(false);
       } else if (event === "INITIAL_SESSION") {
-        // No session exists
         if (!session) {
-          console.log("AuthContext: No initial session");
+          authResolved = true;
+          clearTimeout(safetyTimeout);
           setLoading(false);
         }
       }
     });
-
-    // Safety timeout in case something goes wrong
-    const safetyTimeout = setTimeout(() => {
-      if (isMounted && loading) {
-        console.warn("AuthContext: Safety timeout triggered, stopping loading");
-        setLoading(false);
-      }
-    }, 5000);
 
     return () => {
       isMounted = false;
