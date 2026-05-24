@@ -9,6 +9,7 @@ import {
   Shield,
   Coins,
   Crown,
+  History,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import toast from "react-hot-toast";
@@ -36,6 +37,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   const navItems = [
     { path: "/dashboard", icon: Home, label: "Dashboard" },
+    { path: "/history", icon: History, label: "Game History" },
     { path: "/profile", icon: User, label: "Profile" },
     { path: "/settings", icon: Settings, label: "Settings" },
   ];

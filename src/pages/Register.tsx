@@ -5,7 +5,6 @@ import {
   Crown,
   Mail,
   Lock,
-  User,
   Eye,
   EyeOff,
   UserCheck,
@@ -13,6 +12,7 @@ import {
   Users,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
+import UsernameInput from "../components/UsernameInput";
 import toast from "react-hot-toast";
 
 const Register: React.FC = () => {
@@ -64,7 +64,7 @@ const Register: React.FC = () => {
 
     if (!/^[a-zA-Z0-9_]+$/.test(formData.username)) {
       toast.error(
-        "Username can only contain letters, numbers, and underscores"
+        "Username can only contain letters, numbers, and underscores",
       );
       return false;
     }
@@ -82,7 +82,7 @@ const Register: React.FC = () => {
       formData.email,
       formData.password,
       formData.username,
-      formData.displayName
+      formData.displayName,
     );
     setIsLoading(false);
 
@@ -155,19 +155,13 @@ const Register: React.FC = () => {
               >
                 Username
               </label>
-              <div className="relative">
-                <User className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                <input
-                  id="username"
-                  name="username"
-                  type="text"
-                  value={formData.username}
-                  onChange={handleChange}
-                  placeholder="Choose a username"
-                  className="w-full pl-10 pr-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:border-yellow-500 focus:ring-2 focus:ring-yellow-500/20 transition-all duration-200"
-                  required
-                />
-              </div>
+              <UsernameInput
+                value={formData.username}
+                onChange={(val) =>
+                  setFormData((prev) => ({ ...prev, username: val }))
+                }
+                placeholder="Choose a username"
+              />
             </div>
 
             {/* Display Name field */}

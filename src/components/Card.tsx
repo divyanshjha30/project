@@ -1,6 +1,6 @@
-import React from 'react';
-import { motion } from 'framer-motion';
-import { Card as CardType } from '../types';
+import React from "react";
+import { motion } from "framer-motion";
+import { Card as CardType } from "../types";
 
 interface CardProps {
   card: CardType | null;
@@ -10,25 +10,25 @@ interface CardProps {
   animate?: boolean;
 }
 
-const Card: React.FC<CardProps> = ({ 
-  card, 
-  faceDown = false, 
-  className = '', 
+const Card: React.FC<CardProps> = ({
+  card,
+  faceDown = false,
+  className = "",
   onClick,
-  animate = true 
+  animate = true,
 }) => {
   const suitSymbols = {
-    hearts: '♥',
-    diamonds: '♦',
-    clubs: '♣',
-    spades: '♠',
+    hearts: "♥",
+    diamonds: "♦",
+    clubs: "♣",
+    spades: "♠",
   };
 
   const suitColors = {
-    hearts: 'text-red-500',
-    diamonds: 'text-red-500',
-    clubs: 'text-gray-800',
-    spades: 'text-gray-800',
+    hearts: "text-red-500",
+    diamonds: "text-red-500",
+    clubs: "text-gray-800",
+    spades: "text-gray-800",
   };
 
   const cardContent = () => {
@@ -41,22 +41,30 @@ const Card: React.FC<CardProps> = ({
     }
 
     return (
-      <div className={`w-full h-full bg-white rounded-lg border-2 border-gray-300 shadow-md flex flex-col justify-between p-2 ${onClick ? 'cursor-pointer hover:shadow-lg' : ''}`}>
+      <div
+        className={`w-full h-full bg-white rounded-lg border-2 border-gray-300 shadow-md flex flex-col justify-between p-1 overflow-hidden ${onClick ? "cursor-pointer hover:shadow-lg" : ""}`}
+      >
         {/* Top left */}
-        <div className={`text-sm font-bold ${suitColors[card.suit]} leading-none`}>
+        <div
+          className={`text-[10px] font-bold ${suitColors[card.suit]} leading-tight`}
+        >
           <div>{card.rank}</div>
-          <div>{suitSymbols[card.suit]}</div>
+          <div className="text-[9px]">{suitSymbols[card.suit]}</div>
         </div>
 
         {/* Center suit symbol */}
-        <div className={`text-2xl ${suitColors[card.suit]} self-center`}>
+        <div
+          className={`text-lg ${suitColors[card.suit]} self-center leading-none`}
+        >
           {suitSymbols[card.suit]}
         </div>
 
         {/* Bottom right (rotated) */}
-        <div className={`text-sm font-bold ${suitColors[card.suit]} leading-none self-end transform rotate-180`}>
+        <div
+          className={`text-[10px] font-bold ${suitColors[card.suit]} leading-tight self-end transform rotate-180`}
+        >
           <div>{card.rank}</div>
-          <div>{suitSymbols[card.suit]}</div>
+          <div className="text-[9px]">{suitSymbols[card.suit]}</div>
         </div>
       </div>
     );
@@ -69,11 +77,11 @@ const Card: React.FC<CardProps> = ({
         onClick={onClick}
         initial={{ scale: 0, rotateY: 180 }}
         animate={{ scale: 1, rotateY: 0 }}
-        transition={{ 
+        transition={{
           duration: 0.5,
           type: "spring",
           stiffness: 200,
-          damping: 20
+          damping: 20,
         }}
         whileHover={onClick ? { scale: 1.05 } : {}}
         whileTap={onClick ? { scale: 0.95 } : {}}

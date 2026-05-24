@@ -7,13 +7,25 @@ import React, {
   useCallback,
 } from "react";
 import { supabase } from "../lib/supabase";
-import { Room, RoomPlayer, Game, User, PokerGameState, Card } from "../types";
+import {
+  Room,
+  RoomPlayer,
+  Game,
+  User,
+  PokerGameState,
+  BlackjackGameState,
+  BlackjackPlayer,
+  BlackjackHand,
+  BlackjackResult,
+  Card,
+} from "../types";
 import { useAuth } from "./AuthContext";
 import {
   createDeck,
   shuffleDeck,
   dealCards,
   calculatePokerHandRank,
+  calculateBlackjackValue,
 } from "../utils/cardUtils";
 import toast from "react-hot-toast";
 
@@ -40,7 +52,12 @@ interface GameContextType {
     action: "fold" | "call" | "raise" | "check",
     amount?: number,
   ) => Promise<boolean>;
+  makeBlackjackMove: (
+    action: "hit" | "stand" | "double_down" | "split",
+  ) => Promise<boolean>;
   dealNextHand: () => Promise<boolean>;
+  dealNextBlackjackRound: () => Promise<boolean>;
+  forceFoldCurrentPlayer: () => Promise<boolean>;
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
@@ -56,7 +73,7 @@ export const useGame = () => {
 export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
   const [roomPlayers, setRoomPlayers] = useState<RoomPlayer[]>([]);
@@ -72,13 +89,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     currentRoomRef.current = currentRoom;
   }, [currentRoom]);
 
+  // Stable channel ID to avoid creating too many channels during HMR
+  const channelIdRef = useRef(
+    `realtime-${Math.random().toString(36).slice(2)}`,
+  );
+
   // Subscribe to real-time changes
   useEffect(() => {
     if (!user?.id) return;
 
     console.log("GameContext: Setting up real-time subscriptions...");
 
-    const channelId = `realtime-${user.id}-${Date.now()}`;
+    const channelId = `${channelIdRef.current}-${user.id}`;
 
     // Single channel for all table changes
     const subscription = supabase
@@ -117,6 +139,20 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
       )
       .subscribe((status) => {
         console.log("GameContext: Realtime subscription status:", status);
+        if (status === "SUBSCRIBED") {
+          // Refetch data on successful (re)connection to avoid stale state
+          fetchRoomsInternal();
+          if (currentRoomRef.current) {
+            fetchRoomDetailsInternal(currentRoomRef.current.id);
+          }
+        }
+        if (status === "CHANNEL_ERROR") {
+          // Retry after a brief delay
+          console.warn("GameContext: Channel error, will retry...");
+          setTimeout(() => {
+            subscription.subscribe();
+          }, 2000);
+        }
       });
 
     return () => {
@@ -143,7 +179,22 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
         return;
       }
 
-      setRooms(data || []);
+      // Clean up any empty waiting rooms (players left without clicking Leave)
+      const rooms = data || [];
+      const emptyRoomIds: string[] = [];
+      for (const room of rooms) {
+        if (room.current_players === 0) {
+          emptyRoomIds.push(room.id);
+        }
+      }
+      if (emptyRoomIds.length > 0) {
+        await supabase
+          .from("rooms")
+          .update({ status: "finished" })
+          .in("id", emptyRoomIds);
+      }
+
+      setRooms(rooms.filter((r) => !emptyRoomIds.includes(r.id)));
     } catch (error) {
       console.error("Error fetching rooms:", error);
     }
@@ -416,6 +467,64 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     try {
       setLoading(true);
 
+      // If there's an active game, auto-fold the leaving player
+      if (currentGame?.game_state) {
+        const gameState = currentGame.game_state as PokerGameState;
+        const playerIndex = gameState.players?.findIndex(
+          (p) => p.user_id === user.id,
+        );
+        if (
+          playerIndex !== undefined &&
+          playerIndex >= 0 &&
+          !gameState.players[playerIndex].has_folded
+        ) {
+          const newState: PokerGameState = JSON.parse(
+            JSON.stringify(gameState),
+          );
+          newState.players[playerIndex].has_folded = true;
+
+          // If it was this player's turn, advance to next player
+          if (newState.current_player === playerIndex) {
+            const nonFoldedPlayers = newState.players.filter(
+              (p) => !p.has_folded,
+            );
+            if (nonFoldedPlayers.length === 1) {
+              // Only one player left — they win
+              const winner = nonFoldedPlayers[0];
+              winner.chip_count += newState.pot;
+              newState.pot = 0;
+              newState.phase = "finished";
+            } else {
+              // Move to next active player
+              let next = (playerIndex + 1) % newState.players.length;
+              while (
+                newState.players[next].has_folded ||
+                newState.players[next].is_all_in
+              ) {
+                next = (next + 1) % newState.players.length;
+              }
+              newState.current_player = next;
+            }
+          } else {
+            // Not their turn, just check if only 1 player left
+            const nonFoldedPlayers = newState.players.filter(
+              (p) => !p.has_folded,
+            );
+            if (nonFoldedPlayers.length === 1) {
+              const winner = nonFoldedPlayers[0];
+              winner.chip_count += newState.pot;
+              newState.pot = 0;
+              newState.phase = "finished";
+            }
+          }
+
+          await supabase
+            .from("games")
+            .update({ game_state: newState })
+            .eq("id", currentGame.id);
+        }
+      }
+
       const { error } = await supabase
         .from("room_players")
         .delete()
@@ -426,6 +535,19 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
         console.error("Error leaving room:", error);
         toast.error("Failed to leave room");
         return false;
+      }
+
+      // Check if room is now empty — if so, mark it as finished
+      const { data: remainingPlayers } = await supabase
+        .from("room_players")
+        .select("id")
+        .eq("room_id", roomId);
+
+      if (!remainingPlayers || remainingPlayers.length === 0) {
+        await supabase
+          .from("rooms")
+          .update({ status: "finished" })
+          .eq("id", roomId);
       }
 
       setCurrentRoom(null);
@@ -642,8 +764,15 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
         .eq("is_ready", true)
         .order("seat_index");
 
-      if (playersError || !readyPlayers || readyPlayers.length < 2) {
-        toast.error("Need at least 2 ready players to start");
+      const gameType = currentRoom?.game_type || "poker";
+      const minPlayers = gameType === "blackjack" ? 1 : 2;
+
+      if (playersError || !readyPlayers || readyPlayers.length < minPlayers) {
+        toast.error(
+          gameType === "blackjack"
+            ? "Need at least 1 ready player to start"
+            : "Need at least 2 ready players to start",
+        );
         return false;
       }
 
@@ -659,71 +788,155 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
         return false;
       }
 
-      // Initialize proper poker game state
-      const deck = shuffleDeck(createDeck());
-      const minBet = currentRoom?.min_bet || 10;
-      const smallBlind = Math.floor(minBet / 2);
-      const bigBlind = minBet;
+      if (gameType === "blackjack") {
+        // ─── BLACKJACK GAME START ───
+        const deck = shuffleDeck(createDeck());
+        const minBet = currentRoom?.min_bet || 10;
+        let currentDeck = deck;
 
-      const players = readyPlayers.map((p, i) => ({
-        user_id: p.user_id,
-        seat_index: p.seat_index,
-        cards: [] as Card[],
-        chip_count: p.chip_count,
-        current_bet: 0,
-        has_acted: false,
-        has_folded: false,
-        is_all_in: false,
-      }));
-
-      // Deal hole cards (2 per player)
-      let currentDeck = deck;
-      for (let round = 0; round < 2; round++) {
-        for (const player of players) {
-          const { cards, remaining } = dealCards(currentDeck, 1);
-          player.cards.push(cards[0]);
+        const players: BlackjackPlayer[] = readyPlayers.map((p) => {
+          // Auto-bet the min bet for each player
+          const bet = Math.min(minBet, p.chip_count);
+          const { cards, remaining } = dealCards(currentDeck, 2);
           currentDeck = remaining;
+
+          const handValue = calculateBlackjackValue(cards);
+          const isBlackjack = cards.length === 2 && handValue.value === 21;
+
+          return {
+            user_id: p.user_id,
+            hands: [
+              {
+                cards,
+                bet,
+                status: isBlackjack
+                  ? ("blackjack" as const)
+                  : ("playing" as const),
+                value: handValue.value,
+                soft_ace: handValue.soft,
+              },
+            ],
+            current_hand: 0,
+            total_bet: bet,
+            has_acted: isBlackjack,
+          };
+        });
+
+        // Deal dealer cards (1 face-up, 1 face-down)
+        const { cards: dealerCards, remaining: finalDeck } = dealCards(
+          currentDeck,
+          2,
+        );
+
+        // Find first player who doesn't have blackjack
+        let firstPlayer = 0;
+        while (firstPlayer < players.length && players[firstPlayer].has_acted) {
+          firstPlayer++;
         }
-      }
 
-      // Post blinds
-      const sbIndex = 0; // First player posts small blind
-      const bbIndex = 1; // Second player posts big blind
+        let gameState: BlackjackGameState = {
+          type: "blackjack",
+          phase: firstPlayer >= players.length ? "dealer_turn" : "playing",
+          deck: finalDeck,
+          dealer_cards: dealerCards,
+          dealer_visible_cards: [dealerCards[0]], // Only first card is visible
+          players,
+          current_player: firstPlayer >= players.length ? -1 : firstPlayer,
+          min_bet: minBet,
+        };
 
-      const sbAmount = Math.min(smallBlind, players[sbIndex].chip_count);
-      players[sbIndex].current_bet = sbAmount;
-      players[sbIndex].chip_count -= sbAmount;
+        // If all players had blackjack, run dealer turn immediately
+        if (gameState.phase === "dealer_turn") {
+          gameState = runDealerTurn(gameState);
+        }
 
-      const bbAmount = Math.min(bigBlind, players[bbIndex].chip_count);
-      players[bbIndex].current_bet = bbAmount;
-      players[bbIndex].chip_count -= bbAmount;
+        const { error: gameError } = await supabase
+          .from("games")
+          .insert({ room_id: roomId, game_state: gameState })
+          .select()
+          .single();
 
-      // First to act is player after big blind (or small blind in heads-up)
-      const firstToAct = players.length === 2 ? 0 : 2 % players.length;
+        if (gameError) {
+          toast.error("Failed to create game");
+          return false;
+        }
 
-      const gameState: PokerGameState = {
-        type: "poker",
-        phase: "preflop",
-        deck: currentDeck,
-        community_cards: [],
-        pot: sbAmount + bbAmount,
-        current_bet: bbAmount,
-        dealer_position: 0,
-        current_player: firstToAct,
-        small_blind: smallBlind,
-        big_blind: bigBlind,
-        players,
-      };
+        // Update chips if game finished immediately
+        if (gameState.phase === "finished" && gameState.results) {
+          await updateBlackjackChips(gameState.results, roomId);
+        }
+      } else {
+        // ─── POKER GAME START ───
+        const deck = shuffleDeck(createDeck());
+        const minBet = currentRoom?.min_bet || 10;
+        const smallBlind = Math.floor(minBet / 2);
+        const bigBlind = minBet;
 
-      const { error: gameError } = await supabase
-        .from("games")
-        .insert({ room_id: roomId, game_state: gameState })
-        .select()
-        .single();
+        const players = readyPlayers.map((p, i) => ({
+          user_id: p.user_id,
+          seat_index: p.seat_index,
+          cards: [] as Card[],
+          chip_count: p.chip_count,
+          current_bet: 0,
+          has_acted: false,
+          has_folded: false,
+          is_all_in: false,
+        }));
 
-      if (gameError) {
-        toast.error("Failed to create game");
-        return false;
+        let currentDeck = deck;
+        for (let round = 0; round < 2; round++) {
+          for (const player of players) {
+            const { cards, remaining } = dealCards(currentDeck, 1);
+            player.cards.push(cards[0]);
+            currentDeck = remaining;
+          }
+        }
+
+        const dealerPos = 0;
+        let sbIndex: number, bbIndex: number, firstToAct: number;
+
+        if (players.length === 2) {
+          sbIndex = dealerPos;
+          bbIndex = (dealerPos + 1) % players.length;
+          firstToAct = dealerPos;
+        } else {
+          sbIndex = (dealerPos + 1) % players.length;
+          bbIndex = (dealerPos + 2) % players.length;
+          firstToAct = (dealerPos + 3) % players.length;
+        }
+
+        const sbAmount = Math.min(smallBlind, players[sbIndex].chip_count);
+        players[sbIndex].current_bet = sbAmount;
+        players[sbIndex].chip_count -= sbAmount;
+
+        const bbAmount = Math.min(bigBlind, players[bbIndex].chip_count);
+        players[bbIndex].current_bet = bbAmount;
+        players[bbIndex].chip_count -= bbAmount;
+
+        const gameState: PokerGameState = {
+          type: "poker",
+          phase: "preflop",
+          deck: currentDeck,
+          community_cards: [],
+          pot: sbAmount + bbAmount,
+          current_bet: bbAmount,
+          dealer_position: dealerPos,
+          current_player: firstToAct,
+          small_blind: smallBlind,
+          big_blind: bigBlind,
+          players,
+        };
+
+        const { error: gameError } = await supabase
+          .from("games")
+          .insert({ room_id: roomId, game_state: gameState })
+          .select()
+          .single();
+
+        if (gameError) {
+          toast.error("Failed to create game");
+          return false;
+        }
       }
 
       toast.success("Game started! Cards are dealt.");
@@ -853,6 +1066,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
         return false;
       }
 
+      // If poker hand finished, persist chip changes and update stats
+      if (newState.phase === "finished" && newState.result && currentRoom) {
+        await updatePokerChips(newState, currentRoom.id);
+      }
+
       // Optimistic update
       setCurrentGame({ ...currentGame, game_state: newState });
       return true;
@@ -861,6 +1079,568 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
       toast.error("Failed to make move");
       return false;
     }
+  };
+
+  // Force-fold the current player (used when timer expires — any connected client can trigger this)
+  const forceFoldCurrentPlayer = async (): Promise<boolean> => {
+    if (!currentGame?.game_state) return false;
+
+    const gameState = currentGame.game_state as PokerGameState;
+    if (gameState.phase === "finished" || gameState.phase === "showdown")
+      return false;
+
+    const playerIndex = gameState.current_player;
+    if (
+      playerIndex === undefined ||
+      playerIndex < 0 ||
+      gameState.players[playerIndex].has_folded
+    )
+      return false;
+
+    const newState: PokerGameState = JSON.parse(JSON.stringify(gameState));
+    newState.players[playerIndex].has_folded = true;
+    newState.players[playerIndex].has_acted = true;
+
+    const nonFoldedPlayers = newState.players.filter((p) => !p.has_folded);
+
+    if (nonFoldedPlayers.length === 1) {
+      // Only one player left — they win
+      const winner = nonFoldedPlayers[0];
+      winner.chip_count += newState.pot;
+      newState.pot = 0;
+      newState.phase = "finished";
+    } else {
+      // Move to next active player
+      let next = (playerIndex + 1) % newState.players.length;
+      while (
+        newState.players[next].has_folded ||
+        newState.players[next].is_all_in
+      ) {
+        next = (next + 1) % newState.players.length;
+      }
+      newState.current_player = next;
+    }
+
+    const { error } = await supabase
+      .from("games")
+      .update({ game_state: newState })
+      .eq("id", currentGame.id);
+
+    if (error) {
+      console.error("Error force-folding player:", error);
+      return false;
+    }
+
+    return true;
+  };
+
+  // ─── BLACKJACK MOVE LOGIC ───
+  const makeBlackjackMove = async (
+    action: "hit" | "stand" | "double_down" | "split",
+  ): Promise<boolean> => {
+    if (!user || !currentRoom || !currentGame) return false;
+
+    const state = currentGame.game_state as BlackjackGameState;
+    if (state.type !== "blackjack" || state.phase !== "playing") return false;
+
+    const playerIndex = state.players.findIndex((p) => p.user_id === user.id);
+    if (playerIndex === -1 || playerIndex !== state.current_player)
+      return false;
+
+    const player = { ...state.players[playerIndex] };
+    const hand = { ...player.hands[player.current_hand] };
+    let deck = [...state.deck];
+
+    switch (action) {
+      case "hit": {
+        const { cards, remaining } = dealCards(deck, 1);
+        hand.cards = [...hand.cards, cards[0]];
+        deck = remaining;
+        const val = calculateBlackjackValue(hand.cards);
+        hand.value = val.value;
+        hand.soft_ace = val.soft;
+        if (val.value > 21) {
+          hand.status = "bust";
+        }
+        break;
+      }
+      case "stand": {
+        hand.status = "stand";
+        break;
+      }
+      case "double_down": {
+        // Double the bet, take exactly one card, then stand
+        hand.bet *= 2;
+        player.total_bet += hand.bet / 2; // Add the extra bet amount
+        const { cards, remaining } = dealCards(deck, 1);
+        hand.cards = [...hand.cards, cards[0]];
+        deck = remaining;
+        const val = calculateBlackjackValue(hand.cards);
+        hand.value = val.value;
+        hand.soft_ace = val.soft;
+        hand.status = val.value > 21 ? "bust" : "stand";
+        break;
+      }
+      case "split": {
+        // Can only split if first 2 cards have same rank
+        if (
+          hand.cards.length !== 2 ||
+          hand.cards[0].rank !== hand.cards[1].rank
+        )
+          return false;
+
+        // Create two new hands from the split
+        const { cards: card1, remaining: deck1 } = dealCards(deck, 1);
+        const { cards: card2, remaining: deck2 } = dealCards(deck1, 1);
+        deck = deck2;
+
+        const hand1Cards = [hand.cards[0], card1[0]];
+        const hand2Cards = [hand.cards[1], card2[0]];
+
+        const val1 = calculateBlackjackValue(hand1Cards);
+        const val2 = calculateBlackjackValue(hand2Cards);
+
+        const newHand1: BlackjackHand = {
+          cards: hand1Cards,
+          bet: hand.bet,
+          status: "playing",
+          value: val1.value,
+          soft_ace: val1.soft,
+        };
+        const newHand2: BlackjackHand = {
+          cards: hand2Cards,
+          bet: hand.bet,
+          status: "playing",
+          value: val2.value,
+          soft_ace: val2.soft,
+        };
+
+        player.hands = [
+          ...player.hands.slice(0, player.current_hand),
+          newHand1,
+          newHand2,
+          ...player.hands.slice(player.current_hand + 1),
+        ];
+        player.total_bet += hand.bet; // Additional bet for second hand
+
+        // Update game state with split and return
+        const updatedPlayers = [...state.players];
+        updatedPlayers[playerIndex] = player;
+
+        const splitState: BlackjackGameState = {
+          ...state,
+          deck,
+          players: updatedPlayers,
+        };
+
+        const { error } = await supabase
+          .from("games")
+          .update({ game_state: splitState })
+          .eq("id", currentGame.id);
+
+        if (error) {
+          toast.error("Failed to make move");
+          return false;
+        }
+        return true;
+      }
+    }
+
+    // Update hand in player
+    if (action !== "split") {
+      player.hands = [
+        ...player.hands.slice(0, player.current_hand),
+        hand,
+        ...player.hands.slice(player.current_hand + 1),
+      ];
+    }
+
+    // Advance to next hand or next player if current hand is done
+    let nextHandIndex = player.current_hand;
+    let nextPlayerIndex = state.current_player;
+    let phase = state.phase;
+
+    if (hand.status !== "playing") {
+      // Move to next hand for this player
+      nextHandIndex = player.current_hand + 1;
+      if (nextHandIndex >= player.hands.length) {
+        // All hands done for this player, move to next
+        player.has_acted = true;
+        player.current_hand = 0;
+        nextPlayerIndex = state.current_player + 1;
+
+        // Find next player who hasn't acted
+        while (
+          nextPlayerIndex < state.players.length &&
+          state.players[nextPlayerIndex].has_acted
+        ) {
+          nextPlayerIndex++;
+        }
+
+        if (nextPlayerIndex >= state.players.length) {
+          phase = "dealer_turn";
+        }
+      } else {
+        player.current_hand = nextHandIndex;
+      }
+    }
+
+    // Update players array
+    const updatedPlayers = [...state.players];
+    updatedPlayers[playerIndex] = player;
+
+    let newState: BlackjackGameState = {
+      ...state,
+      deck,
+      players: updatedPlayers,
+      current_player: phase === "dealer_turn" ? -1 : nextPlayerIndex,
+      phase: phase as BlackjackGameState["phase"],
+    };
+
+    // If dealer_turn, run dealer logic
+    if (phase === "dealer_turn") {
+      newState = runDealerTurn(newState);
+    }
+
+    const { error } = await supabase
+      .from("games")
+      .update({ game_state: newState })
+      .eq("id", currentGame.id);
+
+    if (error) {
+      toast.error("Failed to make move");
+      return false;
+    }
+
+    // Update chips in DB after round finishes
+    if (newState.phase === "finished" && newState.results && currentRoom) {
+      await updateBlackjackChips(newState.results, currentRoom.id);
+    }
+
+    return true;
+  };
+
+  // Dealer hits until 17+, then determine winners
+  const runDealerTurn = (state: BlackjackGameState): BlackjackGameState => {
+    let deck = [...state.deck];
+    let dealerCards = [...state.dealer_cards];
+
+    // Check if all players busted — dealer doesn't need to draw
+    const allBusted = state.players.every((p) =>
+      p.hands.every((h) => h.status === "bust"),
+    );
+
+    if (!allBusted) {
+      // Dealer hits until hard 17 or above
+      let dealerVal = calculateBlackjackValue(dealerCards);
+      while (dealerVal.value < 17) {
+        const { cards, remaining } = dealCards(deck, 1);
+        dealerCards = [...dealerCards, cards[0]];
+        deck = remaining;
+        dealerVal = calculateBlackjackValue(dealerCards);
+      }
+    }
+
+    const dealerVal = calculateBlackjackValue(dealerCards);
+    const dealerBust = dealerVal.value > 21;
+    const dealerBlackjack = dealerCards.length === 2 && dealerVal.value === 21;
+
+    // Calculate results for each player
+    const results: BlackjackResult[] = [];
+
+    const finalPlayers = state.players.map((player) => {
+      let netChips = 0;
+      const handsSummary: string[] = [];
+
+      const newHands = player.hands.map((hand) => {
+        if (hand.status === "bust") {
+          netChips -= hand.bet;
+          handsSummary.push(`Bust (-$${hand.bet})`);
+          return { ...hand, status: "finished" as const };
+        }
+
+        const isNaturalBlackjack = hand.cards.length === 2 && hand.value === 21;
+
+        if (isNaturalBlackjack) {
+          if (dealerBlackjack) {
+            // Push — return bet
+            handsSummary.push(`Blackjack vs Blackjack (Push)`);
+          } else {
+            // Blackjack pays 3:2
+            const winnings = Math.floor(hand.bet * 1.5);
+            netChips += winnings;
+            handsSummary.push(`Blackjack! (+$${winnings})`);
+          }
+          return { ...hand, status: "finished" as const };
+        }
+
+        if (dealerBust) {
+          netChips += hand.bet;
+          handsSummary.push(`Win (dealer bust) (+$${hand.bet})`);
+          return { ...hand, status: "finished" as const };
+        }
+
+        if (hand.value > dealerVal.value) {
+          netChips += hand.bet;
+          handsSummary.push(
+            `Win ${hand.value} vs ${dealerVal.value} (+$${hand.bet})`,
+          );
+        } else if (hand.value === dealerVal.value) {
+          handsSummary.push(`Push ${hand.value} vs ${dealerVal.value} ($0)`);
+        } else {
+          netChips -= hand.bet;
+          handsSummary.push(
+            `Lose ${hand.value} vs ${dealerVal.value} (-$${hand.bet})`,
+          );
+        }
+
+        return { ...hand, status: "finished" as const };
+      });
+
+      results.push({
+        user_id: player.user_id,
+        net_chips: netChips,
+        hands_summary: handsSummary,
+      });
+
+      return { ...player, hands: newHands, has_acted: true };
+    });
+
+    return {
+      ...state,
+      deck,
+      dealer_cards: dealerCards,
+      dealer_visible_cards: dealerCards, // Reveal all dealer cards
+      players: finalPlayers,
+      phase: "finished",
+      current_player: -1,
+      results,
+    };
+  };
+
+  // Helper: update user game stats (total_games, games_won, games_lost)
+  const updateGameStats = async (userId: string, won: boolean) => {
+    const { data: userData } = await supabase
+      .from("users")
+      .select("total_games, games_won, games_lost")
+      .eq("id", userId)
+      .single();
+
+    if (userData) {
+      await supabase
+        .from("users")
+        .update({
+          total_games: userData.total_games + 1,
+          games_won: userData.games_won + (won ? 1 : 0),
+          games_lost: userData.games_lost + (won ? 0 : 1),
+        })
+        .eq("id", userId);
+    }
+  };
+
+  // Update chip counts and stats in DB after poker hand
+  const updatePokerChips = async (state: PokerGameState, roomId: string) => {
+    if (!state.result) return;
+
+    const winnerIds = state.result.winners.map(
+      (w: { user_id: string }) => w.user_id,
+    );
+
+    for (const player of state.players) {
+      // Get their chip count BEFORE this hand (stored in room_players)
+      const { data: prevData } = await supabase
+        .from("room_players")
+        .select("chip_count")
+        .eq("room_id", roomId)
+        .eq("user_id", player.user_id)
+        .single();
+
+      const prevChips = prevData?.chip_count || 0;
+      const netChange = player.chip_count - prevChips;
+
+      // Sync room_players chip_count from final game state
+      await supabase
+        .from("room_players")
+        .update({ chip_count: player.chip_count })
+        .eq("room_id", roomId)
+        .eq("user_id", player.user_id);
+
+      // Update global users.chip_balance
+      if (netChange !== 0) {
+        const { data: userData } = await supabase
+          .from("users")
+          .select("chip_balance")
+          .eq("id", player.user_id)
+          .single();
+
+        if (userData) {
+          const newBalance = Math.max(0, userData.chip_balance + netChange);
+          await supabase
+            .from("users")
+            .update({ chip_balance: newBalance })
+            .eq("id", player.user_id);
+        }
+      }
+
+      // Update game stats
+      const isWinner = winnerIds.includes(player.user_id);
+      await updateGameStats(player.user_id, isWinner);
+    }
+
+    // Refresh current user
+    await refreshUser();
+  };
+
+  // Update chip counts in DB after blackjack round
+  const updateBlackjackChips = async (
+    results: BlackjackResult[],
+    roomId: string,
+  ) => {
+    for (const result of results) {
+      // Update game stats for all players
+      const won = result.net_chips > 0;
+      await updateGameStats(result.user_id, won);
+
+      if (result.net_chips !== 0) {
+        // Update room_players chip_count (table chips)
+        const { data: playerData } = await supabase
+          .from("room_players")
+          .select("chip_count")
+          .eq("room_id", roomId)
+          .eq("user_id", result.user_id)
+          .single();
+
+        if (playerData) {
+          const newCount = Math.max(
+            0,
+            playerData.chip_count + result.net_chips,
+          );
+          await supabase
+            .from("room_players")
+            .update({ chip_count: newCount })
+            .eq("room_id", roomId)
+            .eq("user_id", result.user_id);
+        }
+
+        // Update users.chip_balance (global balance shown on homepage)
+        const { data: userData } = await supabase
+          .from("users")
+          .select("chip_balance")
+          .eq("id", result.user_id)
+          .single();
+
+        if (userData) {
+          const newBalance = Math.max(
+            0,
+            userData.chip_balance + result.net_chips,
+          );
+          await supabase
+            .from("users")
+            .update({ chip_balance: newBalance })
+            .eq("id", result.user_id);
+        }
+      }
+    }
+
+    // Refresh the current user's profile so navbar/homepage reflects new balance
+    await refreshUser();
+  };
+
+  const dealNextBlackjackRound = async (): Promise<boolean> => {
+    if (!user || !currentRoom || !currentGame) return false;
+
+    const state = currentGame.game_state as BlackjackGameState;
+    if (state.type !== "blackjack" || state.phase !== "finished") return false;
+
+    const { data: roomPlayerData } = await supabase
+      .from("room_players")
+      .select("*")
+      .eq("room_id", currentRoom.id)
+      .order("seat_index");
+
+    if (!roomPlayerData || roomPlayerData.length < 1) {
+      toast.error("Not enough players for next round");
+      return false;
+    }
+
+    const deck = shuffleDeck(createDeck());
+    const minBet = state.min_bet;
+    let currentDeck = deck;
+
+    const players: BlackjackPlayer[] = roomPlayerData.map((p) => {
+      const bet = Math.min(minBet, p.chip_count);
+      const { cards, remaining } = dealCards(currentDeck, 2);
+      currentDeck = remaining;
+      const handValue = calculateBlackjackValue(cards);
+      const isBlackjack = cards.length === 2 && handValue.value === 21;
+
+      return {
+        user_id: p.user_id,
+        hands: [
+          {
+            cards,
+            bet,
+            status: isBlackjack ? ("blackjack" as const) : ("playing" as const),
+            value: handValue.value,
+            soft_ace: handValue.soft,
+          },
+        ],
+        current_hand: 0,
+        total_bet: bet,
+        has_acted: isBlackjack,
+      };
+    });
+
+    const { cards: dealerCards, remaining: finalDeck } = dealCards(
+      currentDeck,
+      2,
+    );
+
+    let firstPlayer = 0;
+    while (firstPlayer < players.length && players[firstPlayer].has_acted) {
+      firstPlayer++;
+    }
+
+    let newState: BlackjackGameState = {
+      type: "blackjack",
+      phase: firstPlayer >= players.length ? "dealer_turn" : "playing",
+      deck: finalDeck,
+      dealer_cards: dealerCards,
+      dealer_visible_cards: [dealerCards[0]],
+      players,
+      current_player: firstPlayer >= players.length ? -1 : firstPlayer,
+      min_bet: minBet,
+    };
+
+    // If all players had blackjack, run dealer turn immediately
+    if (newState.phase === "dealer_turn") {
+      newState = runDealerTurn(newState);
+    }
+
+    // Mark old game as finished and create new one
+    await supabase
+      .from("games")
+      .update({ finished_at: new Date().toISOString() })
+      .eq("id", currentGame.id);
+
+    const { error } = await supabase
+      .from("games")
+      .insert({ room_id: currentRoom.id, game_state: newState })
+      .select()
+      .single();
+
+    if (error) {
+      toast.error("Failed to deal next round");
+      return false;
+    }
+
+    // Update chips if game finished immediately
+    if (newState.phase === "finished" && newState.results) {
+      await updateBlackjackChips(newState.results, currentRoom.id);
+    }
+
+    toast.success("New round dealt!");
+    return true;
   };
 
   const dealNextHand = async (): Promise<boolean> => {
@@ -981,7 +1761,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({
     fetchRoomDetails,
     startGame,
     makeMove,
+    makeBlackjackMove,
     dealNextHand,
+    dealNextBlackjackRound,
+    forceFoldCurrentPlayer,
   };
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;

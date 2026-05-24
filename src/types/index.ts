@@ -4,6 +4,7 @@ export interface User {
   username: string;
   display_name: string;
   avatar_url?: string;
+  banner_id?: string;
   chip_balance: number;
   role: "user" | "admin" | "mod";
   total_games: number;
@@ -109,6 +110,13 @@ export interface BlackjackGameState {
   players: BlackjackPlayer[];
   current_player: number;
   min_bet: number;
+  results?: BlackjackResult[];
+}
+
+export interface BlackjackResult {
+  user_id: string;
+  net_chips: number; // positive = won, negative = lost, 0 = push
+  hands_summary: string[];
 }
 
 export interface BlackjackPlayer {

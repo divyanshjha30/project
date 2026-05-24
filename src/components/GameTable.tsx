@@ -1,12 +1,13 @@
-import React from 'react';
-import { motion } from 'framer-motion';
-import { RoomPlayer } from '../types';
-import Card from './Card';
-import ChipStack from './ChipStack';
+import React from "react";
+import { motion } from "framer-motion";
+import { RoomPlayer } from "../types";
+import Card from "./Card";
+import ChipStack from "./ChipStack";
+import PlayerAvatar from "./PlayerAvatar";
 
 interface GameTableProps {
   players: RoomPlayer[];
-  gameType: 'poker' | 'blackjack';
+  gameType: "poker" | "blackjack";
   currentPlayer?: number;
   pot?: number;
   communityCards?: any[];
@@ -21,19 +22,19 @@ const GameTable: React.FC<GameTableProps> = ({
   pot = 0,
   communityCards = [],
   dealerCards = [],
-  className = ''
+  className = "",
 }) => {
   const getPlayerPosition = (seatIndex: number, totalSeats: number) => {
     const angle = (seatIndex / totalSeats) * 2 * Math.PI - Math.PI / 2;
-    const radius = gameType === 'poker' ? 200 : 180;
-    
+    const radius = gameType === "poker" ? 200 : 180;
+
     return {
       x: Math.cos(angle) * radius,
       y: Math.sin(angle) * radius,
     };
   };
 
-  const maxSeats = gameType === 'poker' ? 8 : 6;
+  const maxSeats = gameType === "poker" ? 8 : 6;
 
   return (
     <div className={`relative w-full h-full min-h-[600px] ${className}`}>
@@ -42,21 +43,23 @@ const GameTable: React.FC<GameTableProps> = ({
         <div className="w-96 h-64 bg-green-800 rounded-full border-8 border-yellow-600 shadow-2xl flex items-center justify-center">
           {/* Felt texture overlay */}
           <div className="absolute inset-0 bg-gradient-radial from-green-700 to-green-900 rounded-full opacity-80"></div>
-          
+
           {/* Center content */}
           <div className="relative z-10 text-center">
-            {gameType === 'poker' && pot > 0 && (
+            {gameType === "poker" && pot > 0 && (
               <motion.div
                 className="mb-4"
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
                 transition={{ type: "spring", stiffness: 300 }}
               >
-                <div className="text-yellow-300 text-sm font-semibold mb-2">POT</div>
+                <div className="text-yellow-300 text-sm font-semibold mb-2">
+                  POT
+                </div>
                 <ChipStack amount={pot} size="large" />
               </motion.div>
             )}
-            
+
             {communityCards.length > 0 && (
               <motion.div
                 className="flex gap-2 justify-center"
@@ -70,7 +73,7 @@ const GameTable: React.FC<GameTableProps> = ({
               </motion.div>
             )}
 
-            {gameType === 'blackjack' && dealerCards.length > 0 && (
+            {gameType === "blackjack" && dealerCards.length > 0 && (
               <div className="text-center">
                 <div className="text-white text-sm mb-2">Dealer</div>
                 <div className="flex gap-1 justify-center">
@@ -88,7 +91,7 @@ const GameTable: React.FC<GameTableProps> = ({
       {players.map((player) => {
         const position = getPlayerPosition(player.seat_index, maxSeats);
         const isCurrentPlayer = currentPlayer === player.seat_index;
-        
+
         return (
           <motion.div
             key={player.id}
@@ -101,17 +104,27 @@ const GameTable: React.FC<GameTableProps> = ({
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5 }}
           >
-            <div className={`
+            <div
+              className={`
               relative bg-gray-800 rounded-lg p-3 border-2 min-w-[120px]
-              ${isCurrentPlayer ? 'border-yellow-400 shadow-lg shadow-yellow-400/50' : 'border-gray-600'}
-            `}>
+              ${isCurrentPlayer ? "border-yellow-400 shadow-lg shadow-yellow-400/50" : "border-gray-600"}
+            `}
+            >
               {/* Player info */}
-              <div className="text-center mb-2">
-                <div className="text-white text-sm font-semibold truncate">
-                  {player.user.display_name}
-                </div>
-                <div className="text-yellow-300 text-xs">
-                  {player.chip_count} chips
+              <div className="flex items-center space-x-2 mb-2">
+                <PlayerAvatar
+                  userId={player.user_id}
+                  avatarUrl={player.user.avatar_url}
+                  displayName={player.user.display_name}
+                  size="sm"
+                />
+                <div className="min-w-0">
+                  <div className="text-white text-xs font-semibold truncate">
+                    {player.user.display_name}
+                  </div>
+                  <div className="text-yellow-300 text-[10px]">
+                    {player.chip_count} chips
+                  </div>
                 </div>
               </div>
 
@@ -119,8 +132,18 @@ const GameTable: React.FC<GameTableProps> = ({
               {player.user_id && (
                 <div className="flex justify-center gap-1 mb-2">
                   {/* In a real game, this would show actual cards */}
-                  <Card card={null} faceDown animate={false} className="w-12 h-16" />
-                  <Card card={null} faceDown animate={false} className="w-12 h-16" />
+                  <Card
+                    card={null}
+                    faceDown
+                    animate={false}
+                    className="w-12 h-16"
+                  />
+                  <Card
+                    card={null}
+                    faceDown
+                    animate={false}
+                    className="w-12 h-16"
+                  />
                 </div>
               )}
 
@@ -168,7 +191,7 @@ const GameTable: React.FC<GameTableProps> = ({
       {Array.from({ length: maxSeats - players.length }, (_, index) => {
         const seatIndex = index + players.length;
         const position = getPlayerPosition(seatIndex, maxSeats);
-        
+
         return (
           <div
             key={`empty-${seatIndex}`}

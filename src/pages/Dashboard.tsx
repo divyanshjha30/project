@@ -12,13 +12,74 @@ import {
 } from "lucide-react";
 import { useGame } from "../contexts/GameContext";
 import { useAuth } from "../contexts/AuthContext";
+import { supabase } from "../lib/supabase";
 import toast from "react-hot-toast";
 
 const Dashboard: React.FC = () => {
   const { rooms, fetchRooms, joinRoom, loading } = useGame();
-  const { signOut, user } = useAuth();
+  const { signOut, user, refreshUser } = useAuth();
   const navigate = useNavigate();
   const [loadingTimeout, setLoadingTimeout] = useState(false);
+
+  // Sync user stats from game history (fixes old games that didn't track stats)
+  const syncStats = async () => {
+    if (!user) return;
+
+    const { data: games } = await supabase
+      .from("games")
+      .select("game_state")
+      .not("finished_at", "is", null);
+
+    if (!games) return;
+
+    let totalGames = 0;
+    let gamesWon = 0;
+    let gamesLost = 0;
+
+    for (const game of games) {
+      const state = game.game_state as any;
+      if (!state) continue;
+
+      if (state.type === "blackjack") {
+        const players = state.players || [];
+        if (!players.some((p: any) => p.user_id === user.id)) continue;
+        totalGames++;
+        const result = state.results?.find((r: any) => r.user_id === user.id);
+        if (result) {
+          if (result.net_chips > 0) gamesWon++;
+          else if (result.net_chips < 0) gamesLost++;
+        }
+      } else {
+        const players = state.players || [];
+        if (!players.some((p: any) => p.user_id === user.id)) continue;
+        totalGames++;
+        if (state.result) {
+          const isWinner = state.result.winners?.some(
+            (w: any) => w.user_id === user.id,
+          );
+          if (isWinner) gamesWon++;
+          else gamesLost++;
+        }
+      }
+    }
+
+    // Only update if different from current
+    if (
+      totalGames !== user.total_games ||
+      gamesWon !== user.games_won ||
+      gamesLost !== (user.games_lost || 0)
+    ) {
+      await supabase
+        .from("users")
+        .update({
+          total_games: totalGames,
+          games_won: gamesWon,
+          games_lost: gamesLost,
+        })
+        .eq("id", user.id);
+      await refreshUser();
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -26,6 +87,7 @@ const Dashboard: React.FC = () => {
     const loadRooms = async () => {
       if (isMounted) {
         await fetchRooms();
+        await syncStats();
       }
     };
 
@@ -310,6 +372,10 @@ const Dashboard: React.FC = () => {
           </div>
         )}
       </motion.div>
+
+      <div className="text-center text-gray-500 text-sm pb-4">
+        🎯 Virtual chips only - No real money gambling
+      </div>
     </div>
   );
 };

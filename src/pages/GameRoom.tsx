@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -14,8 +14,9 @@ import {
 import { useGame } from "../contexts/GameContext";
 import { useAuth } from "../contexts/AuthContext";
 import GameTable from "../components/GameTable";
-import Card from "../components/Card";
-import ChipStack from "../components/ChipStack";
+import BlackjackGameView from "../components/BlackjackGameView";
+import PlayerAvatar from "../components/PlayerAvatar";
+import PlayerTooltip from "../components/PlayerTooltip";
 import toast from "react-hot-toast";
 
 const GameRoom: React.FC = () => {
@@ -31,13 +32,28 @@ const GameRoom: React.FC = () => {
     toggleReady,
     startGame,
     makeMove,
+    makeBlackjackMove,
     dealNextHand,
+    dealNextBlackjackRound,
+    forceFoldCurrentPlayer,
     loading,
   } = useGame();
 
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [raiseAmount, setRaiseAmount] = useState(0);
+
+  // Cache player names so they persist even after a player leaves the room
+  const playerNameCacheRef = useRef<Record<string, string>>({});
+
+  // Update cache whenever roomPlayers changes
+  useEffect(() => {
+    roomPlayers.forEach((p: any) => {
+      if (p.user?.display_name) {
+        playerNameCacheRef.current[p.user_id] = p.user.display_name;
+      }
+    });
+  }, [roomPlayers]);
 
   useEffect(() => {
     if (roomId) {
@@ -48,7 +64,14 @@ const GameRoom: React.FC = () => {
           setLoadingTimeout(true);
         }
       }, 10000);
-      return () => clearTimeout(timer);
+      // Fallback poll every 10s in case realtime drops
+      const poll = setInterval(() => {
+        fetchRoomDetails(roomId);
+      }, 10000);
+      return () => {
+        clearTimeout(timer);
+        clearInterval(poll);
+      };
     }
   }, [roomId]); // Removed loading from dependency array to prevent loops
 
@@ -87,8 +110,10 @@ const GameRoom: React.FC = () => {
 
   const isHost = user?.id === currentRoom?.host_user_id;
   const currentPlayer = roomPlayers.find((p) => p.user_id === user?.id);
+  const minPlayersNeeded = currentRoom?.game_type === "blackjack" ? 1 : 2;
   const allPlayersReady =
-    roomPlayers.length >= 2 && roomPlayers.every((p) => p.is_ready);
+    roomPlayers.length >= minPlayersNeeded &&
+    roomPlayers.every((p) => p.is_ready);
 
   if (!roomId) {
     return (
@@ -167,7 +192,7 @@ const GameRoom: React.FC = () => {
                 <span>•</span>
                 <span className="flex items-center">
                   <Users className="h-4 w-4 mr-1" />
-                  {currentRoom.current_players}/{currentRoom.max_players}
+                  {roomPlayers.length}/{currentRoom.max_players}
                 </span>
                 <span>•</span>
                 <span>Min bet: {currentRoom.min_bet} chips</span>
@@ -236,11 +261,15 @@ const GameRoom: React.FC = () => {
                       className="flex items-center justify-between p-3 bg-gray-700 rounded-lg"
                     >
                       <div className="flex items-center space-x-3">
-                        <div className="w-10 h-10 bg-gradient-to-r from-yellow-400 to-yellow-600 rounded-full flex items-center justify-center">
-                          <span className="text-black font-bold text-sm">
-                            {player.user.display_name.charAt(0).toUpperCase()}
-                          </span>
-                        </div>
+                        <PlayerTooltip userId={player.user_id}>
+                          <PlayerAvatar
+                            userId={player.user_id}
+                            avatarUrl={player.user.avatar_url}
+                            displayName={player.user.display_name}
+                            size="md"
+                            showTooltip={false}
+                          />
+                        </PlayerTooltip>
                         <div>
                           <p className="text-white font-medium">
                             {player.user.display_name}
@@ -323,8 +352,8 @@ const GameRoom: React.FC = () => {
 
                   {!allPlayersReady && (
                     <p className="text-center text-gray-400 text-sm">
-                      {roomPlayers.length < 2
-                        ? "Need at least 2 players to start"
+                      {roomPlayers.length < minPlayersNeeded
+                        ? `Need at least ${minPlayersNeeded} player${minPlayersNeeded > 1 ? "s" : ""} to start`
                         : "All players must be ready to start"}
                     </p>
                   )}
@@ -370,18 +399,32 @@ const GameRoom: React.FC = () => {
               </div>
             </div>
           </div>
+        ) : currentRoom.game_type === "blackjack" ? (
+          // Blackjack game view
+          <BlackjackGameView
+            currentGame={currentGame}
+            currentRoom={currentRoom}
+            user={user}
+            makeBlackjackMove={makeBlackjackMove}
+            dealNextBlackjackRound={dealNextBlackjackRound}
+            isHost={isHost}
+            roomPlayers={roomPlayers}
+            playerNameCache={playerNameCacheRef.current}
+          />
         ) : (
-          // Active game view
+          // Poker active game view
           <ActiveGameView
             currentGame={currentGame}
             currentRoom={currentRoom}
             user={user}
             makeMove={makeMove}
             dealNextHand={dealNextHand}
+            forceFoldCurrentPlayer={forceFoldCurrentPlayer}
             isHost={isHost}
             raiseAmount={raiseAmount}
             setRaiseAmount={setRaiseAmount}
             roomPlayers={roomPlayers}
+            playerNameCache={playerNameCacheRef.current}
           />
         )}
       </div>
@@ -490,7 +533,22 @@ const GameRoom: React.FC = () => {
   );
 };
 
-// Active Game View Component
+// ─── Poker Table Active Game View ──────────────────────────────────────────────
+// Full visual poker table with animations for dealing, chips, and player seats
+
+// Player seat positions around an oval table (percentages)
+// Positions arranged so "me" is always at the bottom center
+const SEAT_POSITIONS: { top: string; left: string }[] = [
+  { top: "78%", left: "50%" }, // Seat 0 - bottom center (ME)
+  { top: "70%", left: "15%" }, // Seat 1 - bottom left
+  { top: "35%", left: "5%" }, // Seat 2 - mid left
+  { top: "8%", left: "20%" }, // Seat 3 - top left
+  { top: "5%", left: "50%" }, // Seat 4 - top center
+  { top: "8%", left: "80%" }, // Seat 5 - top right
+  { top: "35%", left: "95%" }, // Seat 6 - mid right
+  { top: "70%", left: "85%" }, // Seat 7 - bottom right
+];
+
 const ActiveGameView: React.FC<{
   currentGame: any;
   currentRoom: any;
@@ -500,22 +558,93 @@ const ActiveGameView: React.FC<{
     amount?: number,
   ) => Promise<boolean>;
   dealNextHand: () => Promise<boolean>;
+  forceFoldCurrentPlayer: () => Promise<boolean>;
   isHost: boolean;
   raiseAmount: number;
   setRaiseAmount: (n: number) => void;
   roomPlayers: any[];
+  playerNameCache: Record<string, string>;
 }> = ({
   currentGame,
   currentRoom,
   user,
   makeMove,
   dealNextHand,
+  forceFoldCurrentPlayer,
   isHost,
   raiseAmount,
   setRaiseAmount,
   roomPlayers,
+  playerNameCache,
 }) => {
-  if (!currentGame?.game_state) {
+  const [dealingCards, setDealingCards] = useState(false);
+  const [chipsAnimating, setChipsAnimating] = useState(false);
+  const prevPhaseRef = useRef<string>("");
+
+  // Turn timer - 30 seconds per turn
+  const TURN_TIME = 30;
+  const [timeLeft, setTimeLeft] = useState(TURN_TIME);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const gameState = currentGame?.game_state as any;
+  const myPlayerIndex =
+    gameState?.players?.findIndex((p: any) => p.user_id === user?.id) ?? -1;
+  const isMyTurn =
+    gameState &&
+    gameState.current_player === myPlayerIndex &&
+    gameState.phase !== "finished" &&
+    gameState.phase !== "showdown";
+
+  useEffect(() => {
+    if (!gameState) return;
+    setTimeLeft(TURN_TIME);
+    if (timerRef.current) clearInterval(timerRef.current);
+
+    if (gameState.phase !== "finished" && gameState.phase !== "showdown") {
+      timerRef.current = setInterval(() => {
+        setTimeLeft((prev) => {
+          if (prev <= 1) {
+            if (timerRef.current) clearInterval(timerRef.current);
+            // Auto-fold: if it's my turn, I fold myself. If it's opponent's turn, force-fold them.
+            if (isMyTurn) {
+              makeMove("fold");
+            } else {
+              forceFoldCurrentPlayer();
+            }
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [gameState?.current_player, gameState?.phase]);
+
+  // Trigger dealing animation when phase changes
+  useEffect(() => {
+    if (!gameState) return;
+    if (prevPhaseRef.current !== gameState.phase) {
+      if (
+        gameState.phase === "preflop" ||
+        gameState.phase === "flop" ||
+        gameState.phase === "turn" ||
+        gameState.phase === "river"
+      ) {
+        setDealingCards(true);
+        setTimeout(() => setDealingCards(false), 800);
+      }
+      if (gameState.phase === "preflop") {
+        setChipsAnimating(true);
+        setTimeout(() => setChipsAnimating(false), 600);
+      }
+      prevPhaseRef.current = gameState.phase;
+    }
+  }, [gameState?.phase]);
+
+  if (!currentGame?.game_state || !gameState) {
     return (
       <div className="max-w-4xl mx-auto text-center py-20">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-yellow-400 mx-auto mb-4"></div>
@@ -524,14 +653,7 @@ const ActiveGameView: React.FC<{
     );
   }
 
-  const gameState = currentGame.game_state as any;
-  const myPlayerIndex =
-    gameState.players?.findIndex((p: any) => p.user_id === user?.id) ?? -1;
   const myPlayer = myPlayerIndex >= 0 ? gameState.players[myPlayerIndex] : null;
-  const isMyTurn =
-    gameState.current_player === myPlayerIndex &&
-    gameState.phase !== "finished" &&
-    gameState.phase !== "showdown";
   const canCheck =
     isMyTurn &&
     (gameState.current_bet === 0 ||
@@ -541,9 +663,28 @@ const ActiveGameView: React.FC<{
     : 0;
   const minRaise = gameState.current_bet * 2 || gameState.big_blind * 2;
 
+  // Reorder players so current user is always at seat 0 (bottom center)
+  const reorderedPlayers = (() => {
+    if (myPlayerIndex < 0) return gameState.players || [];
+    const players = [...(gameState.players || [])];
+    const before = players.splice(0, myPlayerIndex);
+    return [...players, ...before];
+  })();
+
+  // Map original index to visual seat index
+  const getVisualSeatIndex = (originalIndex: number) => {
+    if (myPlayerIndex < 0) return originalIndex;
+    return (
+      (originalIndex - myPlayerIndex + reorderedPlayers.length) %
+      reorderedPlayers.length
+    );
+  };
+
   const getPlayerDisplayName = (userId: string) => {
     const rp = roomPlayers.find((p: any) => p.user_id === userId);
-    return rp?.user?.display_name || userId.slice(0, 8);
+    if (rp?.user?.display_name) return rp.user.display_name;
+    // Fallback to cached name (persists after player leaves)
+    return playerNameCache[userId] || userId.slice(0, 8);
   };
 
   const suitSymbol: Record<string, string> = {
@@ -559,208 +700,403 @@ const ActiveGameView: React.FC<{
     spades: "text-gray-900",
   };
 
+  const timerPercent = (timeLeft / TURN_TIME) * 100;
+  const timerColor =
+    timeLeft > 15
+      ? "bg-green-500"
+      : timeLeft > 7
+        ? "bg-yellow-500"
+        : "bg-red-500";
+
+  const dealerPos = gameState.dealer_position ?? 0;
+  const totalPlayers = reorderedPlayers.length;
+
+  // Determine SB/BB positions
+  const getSBIndex = () => {
+    if (totalPlayers === 2) return dealerPos;
+    return (dealerPos + 1) % totalPlayers;
+  };
+  const getBBIndex = () => {
+    if (totalPlayers === 2) return (dealerPos + 1) % totalPlayers;
+    return (dealerPos + 2) % totalPlayers;
+  };
+
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
-      {/* Game Info Bar */}
-      <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-xl p-4">
-        <div className="flex items-center space-x-6">
-          <span className="text-gray-400 text-sm">
+    <div className="w-full max-w-7xl mx-auto">
+      {/* Top Info Bar */}
+      <div className="flex items-center justify-between bg-gray-800/80 backdrop-blur border border-gray-700 rounded-xl p-3 mb-4">
+        <div className="flex items-center space-x-4">
+          <span className="text-gray-400 text-xs">
             Phase:{" "}
-            <span className="text-yellow-400 font-semibold uppercase">
+            <span className="text-yellow-400 font-bold uppercase">
               {gameState.phase}
             </span>
           </span>
-          <span className="text-gray-400 text-sm">
-            Pot:{" "}
-            <span className="text-yellow-400 font-semibold">
-              {gameState.pot} chips
-            </span>
-          </span>
-          <span className="text-gray-400 text-sm">
+          <span className="text-gray-400 text-xs">
             Blinds:{" "}
-            <span className="text-white">
+            <span className="text-white font-semibold">
               {gameState.small_blind}/{gameState.big_blind}
             </span>
           </span>
         </div>
-        {isMyTurn && (
-          <span className="bg-yellow-600 text-black px-3 py-1 rounded-full text-sm font-bold animate-pulse">
-            YOUR TURN
-          </span>
-        )}
-        {gameState.phase === "finished" && (
-          <span className="bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold">
-            HAND COMPLETE
-          </span>
-        )}
-      </div>
-
-      {/* Community Cards */}
-      <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
-        <h3 className="text-sm text-gray-400 mb-3 text-center">
-          Community Cards
-        </h3>
-        <div className="flex justify-center gap-3">
-          {gameState.community_cards && gameState.community_cards.length > 0
-            ? gameState.community_cards.map((card: any, i: number) => (
-                <motion.div
-                  key={card.id || i}
-                  initial={{ opacity: 0, rotateY: 180 }}
-                  animate={{ opacity: 1, rotateY: 0 }}
-                  transition={{ delay: i * 0.15, duration: 0.3 }}
-                  className="w-16 h-24 bg-white rounded-lg border-2 border-gray-300 flex flex-col items-center justify-center shadow-lg"
-                >
-                  <span className={`text-xl font-bold ${suitColor[card.suit]}`}>
-                    {card.rank}
-                  </span>
-                  <span className={`text-2xl ${suitColor[card.suit]}`}>
-                    {suitSymbol[card.suit]}
-                  </span>
-                </motion.div>
-              ))
-            : Array.from({ length: 5 }, (_, i) => (
-                <div
-                  key={i}
-                  className="w-16 h-24 bg-gray-700 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center"
-                >
-                  <span className="text-gray-500 text-xs">?</span>
-                </div>
-              ))}
-        </div>
-      </div>
-
-      {/* Players */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {gameState.players?.map((player: any, idx: number) => {
-          const isMe = player.user_id === user?.id;
-          const isActive =
-            gameState.current_player === idx &&
-            gameState.phase !== "finished" &&
-            gameState.phase !== "showdown";
-          const showCards =
-            isMe ||
-            gameState.phase === "showdown" ||
-            gameState.phase === "finished";
-
-          return (
-            <motion.div
-              key={player.user_id}
-              className={`bg-gray-800 border-2 rounded-xl p-4 ${
-                isActive
-                  ? "border-yellow-400 shadow-lg shadow-yellow-400/20"
-                  : player.has_folded
-                    ? "border-red-900 opacity-50"
-                    : isMe
-                      ? "border-blue-500"
-                      : "border-gray-700"
-              }`}
-              animate={isActive ? { scale: [1, 1.02, 1] } : {}}
-              transition={{ duration: 1, repeat: isActive ? Infinity : 0 }}
+        <div className="flex items-center gap-3">
+          {isMyTurn && (
+            <motion.span
+              animate={{ scale: [1, 1.05, 1] }}
+              transition={{ duration: 1, repeat: Infinity }}
+              className="bg-yellow-500 text-black px-3 py-1 rounded-full text-xs font-bold"
             >
-              <div className="flex items-center justify-between mb-2">
-                <span
-                  className={`text-sm font-semibold truncate ${isMe ? "text-blue-400" : "text-white"}`}
-                >
-                  {isMe ? "You" : getPlayerDisplayName(player.user_id)}
-                </span>
-                {isActive && (
-                  <span className="w-2 h-2 bg-yellow-400 rounded-full animate-ping"></span>
-                )}
+              YOUR TURN
+            </motion.span>
+          )}
+          {/* Timer */}
+          {gameState.phase !== "finished" && gameState.phase !== "showdown" && (
+            <div className="flex items-center gap-2">
+              <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
+                <motion.div
+                  className={`h-full ${timerColor} rounded-full`}
+                  animate={{ width: `${timerPercent}%` }}
+                  transition={{ duration: 0.5 }}
+                />
               </div>
-
-              {/* Cards */}
-              <div className="flex gap-1 mb-2 justify-center">
-                {player.cards && player.cards.length > 0
-                  ? showCards
-                    ? player.cards.map((card: any, ci: number) => (
-                        <div
-                          key={ci}
-                          className="w-12 h-18 bg-white rounded border border-gray-300 flex flex-col items-center justify-center p-1"
-                        >
-                          <span
-                            className={`text-sm font-bold ${suitColor[card.suit]}`}
-                          >
-                            {card.rank}
-                          </span>
-                          <span className={`text-lg ${suitColor[card.suit]}`}>
-                            {suitSymbol[card.suit]}
-                          </span>
-                        </div>
-                      ))
-                    : player.cards.map((_: any, ci: number) => (
-                        <div
-                          key={ci}
-                          className="w-12 h-18 bg-gradient-to-br from-blue-900 to-blue-700 rounded border-2 border-blue-600 flex items-center justify-center"
-                        >
-                          <div className="w-6 h-6 bg-blue-600 rounded-full opacity-50"></div>
-                        </div>
-                      ))
-                  : null}
-              </div>
-
-              {/* Player info */}
-              <div className="text-center space-y-1">
-                <div className="text-yellow-300 text-xs font-semibold">
-                  {player.chip_count} chips
-                </div>
-                {player.current_bet > 0 && (
-                  <div className="text-orange-400 text-xs">
-                    Bet: {player.current_bet}
-                  </div>
-                )}
-                {player.has_folded && (
-                  <div className="text-red-400 text-xs font-bold">FOLDED</div>
-                )}
-                {player.is_all_in && (
-                  <div className="text-purple-400 text-xs font-bold">
-                    ALL IN
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          );
-        })}
+              <span
+                className={`text-xs font-bold ${timeLeft <= 7 ? "text-red-400" : "text-gray-300"}`}
+              >
+                {timeLeft}s
+              </span>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* My Cards (larger display) */}
-      {myPlayer && !myPlayer.has_folded && (
-        <div className="bg-gray-800 border border-blue-500 rounded-xl p-4">
-          <h3 className="text-sm text-blue-400 mb-2 text-center">Your Hand</h3>
-          <div className="flex justify-center gap-4">
-            {myPlayer.cards?.map((card: any, i: number) => (
-              <motion.div
-                key={card.id || i}
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: i * 0.2 }}
-                className="w-20 h-28 bg-white rounded-lg border-2 border-blue-400 flex flex-col items-center justify-center shadow-xl"
-              >
-                <span className={`text-2xl font-bold ${suitColor[card.suit]}`}>
-                  {card.rank}
-                </span>
-                <span className={`text-3xl ${suitColor[card.suit]}`}>
-                  {suitSymbol[card.suit]}
-                </span>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* ─── POKER TABLE ─────────────────────────────────────── */}
+      <div className="relative w-full" style={{ paddingBottom: "60%" }}>
+        <div className="absolute inset-0">
+          {/* Table Surface */}
+          <div className="absolute inset-[12%] rounded-[50%] bg-gradient-to-b from-green-800 via-green-700 to-green-900 border-[12px] border-yellow-800 shadow-[0_0_60px_rgba(0,0,0,0.8),inset_0_0_80px_rgba(0,0,0,0.3)]">
+            {/* Felt texture */}
+            <div className="absolute inset-0 rounded-[50%] opacity-30 bg-[radial-gradient(ellipse_at_center,_transparent_0%,_rgba(0,0,0,0.3)_100%)]" />
 
-      {/* Action Controls */}
+            {/* Table rail */}
+            <div className="absolute inset-[-14px] rounded-[50%] border-[6px] border-yellow-900/60" />
+
+            {/* ─── POT (Center of table) ─── */}
+            <div className="absolute top-[30%] left-1/2 -translate-x-1/2 z-10">
+              <AnimatePresence>
+                {gameState.pot > 0 && (
+                  <motion.div
+                    initial={{ scale: 0, y: 20 }}
+                    animate={{ scale: 1, y: 0 }}
+                    className="flex flex-col items-center"
+                  >
+                    {/* Chip stack visual */}
+                    <div className="relative mb-1">
+                      {Array.from(
+                        { length: Math.min(Math.ceil(gameState.pot / 50), 6) },
+                        (_, i) => (
+                          <motion.div
+                            key={i}
+                            initial={chipsAnimating ? { scale: 0, y: -30 } : {}}
+                            animate={{ scale: 1, y: 0 }}
+                            transition={{ delay: i * 0.08, type: "spring" }}
+                            className="w-8 h-8 rounded-full border-[3px] border-yellow-600 bg-gradient-to-b from-yellow-400 to-yellow-600 absolute shadow-md"
+                            style={{ bottom: i * 3, left: i % 2 === 0 ? 0 : 4 }}
+                          />
+                        ),
+                      )}
+                      <div className="w-8 h-8 opacity-0" />
+                    </div>
+                    <span className="bg-black/70 text-yellow-300 text-xs font-bold px-2 py-0.5 rounded-full">
+                      {gameState.pot}
+                    </span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* ─── COMMUNITY CARDS (Center) ─── */}
+            <div className="absolute top-[45%] left-1/2 -translate-x-1/2 -translate-y-1/2 z-10">
+              <div className="flex gap-1.5">
+                {gameState.community_cards &&
+                gameState.community_cards.length > 0
+                  ? gameState.community_cards.map((card: any, i: number) => (
+                      <motion.div
+                        key={card.id || `cc-${i}`}
+                        initial={{
+                          opacity: 0,
+                          y: -40,
+                          rotateY: 180,
+                          scale: 0.5,
+                        }}
+                        animate={{ opacity: 1, y: 0, rotateY: 0, scale: 1 }}
+                        transition={{
+                          delay: i * 0.12,
+                          duration: 0.4,
+                          type: "spring",
+                          stiffness: 200,
+                        }}
+                        className="w-11 h-16 sm:w-14 sm:h-20 bg-white rounded-md border border-gray-300 flex flex-col items-center justify-center shadow-lg"
+                      >
+                        <span
+                          className={`text-sm sm:text-lg font-bold ${suitColor[card.suit]}`}
+                        >
+                          {card.rank}
+                        </span>
+                        <span
+                          className={`text-base sm:text-xl ${suitColor[card.suit]}`}
+                        >
+                          {suitSymbol[card.suit]}
+                        </span>
+                      </motion.div>
+                    ))
+                  : Array.from({ length: 5 }, (_, i) => (
+                      <div
+                        key={`empty-cc-${i}`}
+                        className="w-11 h-16 sm:w-14 sm:h-20 rounded-md border border-green-600/40 bg-green-800/30 flex items-center justify-center"
+                      >
+                        <span className="text-green-600/40 text-xs">•</span>
+                      </div>
+                    ))}
+              </div>
+            </div>
+
+            {/* ─── DEALER CHIP (on table near dealer) ─── */}
+            {(() => {
+              const dealerSeat = getVisualSeatIndex(dealerPos);
+              const pos = SEAT_POSITIONS[dealerSeat % SEAT_POSITIONS.length];
+              return (
+                <motion.div
+                  key="dealer-button"
+                  className="absolute z-20"
+                  style={{
+                    top: `calc(${pos.top} - 2%)`,
+                    left: pos.left,
+                    transform: "translate(-50%, -50%)",
+                  }}
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  transition={{ type: "spring", stiffness: 300 }}
+                >
+                  <div className="w-6 h-6 rounded-full bg-white border-2 border-gray-800 flex items-center justify-center shadow-lg">
+                    <span className="text-[10px] font-black text-gray-800">
+                      D
+                    </span>
+                  </div>
+                </motion.div>
+              );
+            })()}
+          </div>
+
+          {/* ─── PLAYER SEATS ─── */}
+          {reorderedPlayers.map((player: any, visualIdx: number) => {
+            const originalIdx = (visualIdx + myPlayerIndex) % totalPlayers;
+            const isMe = player.user_id === user?.id;
+            const isActive =
+              gameState.current_player === originalIdx &&
+              gameState.phase !== "finished" &&
+              gameState.phase !== "showdown";
+            const showCards =
+              isMe ||
+              gameState.phase === "showdown" ||
+              gameState.phase === "finished";
+            const isSB = originalIdx === getSBIndex();
+            const isBB = originalIdx === getBBIndex();
+            const isDealer = originalIdx === dealerPos;
+            const pos = SEAT_POSITIONS[visualIdx % SEAT_POSITIONS.length];
+
+            return (
+              <motion.div
+                key={player.user_id}
+                className="absolute z-10"
+                style={{
+                  top: pos.top,
+                  left: pos.left,
+                  transform: "translate(-50%, -50%)",
+                }}
+                initial={{ opacity: 0, scale: 0.7 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: visualIdx * 0.08 }}
+              >
+                {/* Player bet chips (between player and center) */}
+                {player.current_bet > 0 && (
+                  <motion.div
+                    className="absolute -top-6 left-1/2 -translate-x-1/2"
+                    initial={{ scale: 0, y: 10 }}
+                    animate={{ scale: 1, y: 0 }}
+                    transition={{ type: "spring", stiffness: 300 }}
+                  >
+                    <div className="flex items-center gap-1">
+                      <div className="w-4 h-4 rounded-full bg-gradient-to-b from-yellow-400 to-yellow-600 border border-yellow-700 shadow-sm" />
+                      <span className="text-[10px] text-yellow-300 font-bold bg-black/60 px-1 rounded">
+                        {player.current_bet}
+                      </span>
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* Player card */}
+                <div
+                  className={`relative rounded-xl p-2 min-w-[100px] sm:min-w-[120px] transition-all duration-300 ${
+                    isActive
+                      ? "bg-gray-800/95 border-2 border-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.4)]"
+                      : player.has_folded
+                        ? "bg-gray-900/80 border border-gray-700 opacity-40"
+                        : isMe
+                          ? "bg-gray-800/95 border-2 border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.3)]"
+                          : "bg-gray-800/90 border border-gray-600"
+                  }`}
+                >
+                  {/* Active turn glow ring */}
+                  {isActive && (
+                    <motion.div
+                      className="absolute inset-0 rounded-xl border-2 border-yellow-400"
+                      animate={{ opacity: [0.3, 1, 0.3] }}
+                      transition={{ duration: 1.5, repeat: Infinity }}
+                    />
+                  )}
+
+                  {/* Timer bar for active player */}
+                  {isActive && (
+                    <div className="absolute -bottom-1 left-2 right-2 h-1 bg-gray-700 rounded-full overflow-hidden">
+                      <motion.div
+                        className={`h-full ${timerColor} rounded-full`}
+                        animate={{ width: `${timerPercent}%` }}
+                        transition={{ duration: 0.5 }}
+                      />
+                    </div>
+                  )}
+
+                  {/* SB/BB/D badges */}
+                  <div className="absolute -top-2 -right-2 flex gap-0.5">
+                    {isSB && (
+                      <span className="w-5 h-5 rounded-full bg-blue-600 border border-blue-400 flex items-center justify-center text-[8px] font-bold text-white">
+                        SB
+                      </span>
+                    )}
+                    {isBB && (
+                      <span className="w-5 h-5 rounded-full bg-orange-600 border border-orange-400 flex items-center justify-center text-[8px] font-bold text-white">
+                        BB
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Avatar + Name */}
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <div
+                      className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
+                        isMe
+                          ? "bg-gradient-to-br from-blue-400 to-blue-600 text-white"
+                          : "bg-gradient-to-br from-gray-500 to-gray-700 text-gray-200"
+                      }`}
+                    >
+                      {isMe
+                        ? "U"
+                        : getPlayerDisplayName(player.user_id)
+                            .charAt(0)
+                            .toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-semibold text-white truncate">
+                        {isMe ? "You" : getPlayerDisplayName(player.user_id)}
+                      </p>
+                      <p className="text-[10px] text-yellow-300 font-medium">
+                        {player.chip_count} chips
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Cards */}
+                  <div className="flex gap-0.5 justify-center">
+                    {player.cards && player.cards.length > 0
+                      ? showCards
+                        ? player.cards.map((card: any, ci: number) => (
+                            <motion.div
+                              key={ci}
+                              initial={{
+                                x: 0,
+                                y: -60,
+                                opacity: 0,
+                                rotateY: 180,
+                              }}
+                              animate={{ x: 0, y: 0, opacity: 1, rotateY: 0 }}
+                              transition={{
+                                delay: ci * 0.15 + visualIdx * 0.05,
+                                duration: 0.5,
+                                type: "spring",
+                              }}
+                              className={`w-9 h-13 sm:w-10 sm:h-14 bg-white rounded border ${
+                                isMe
+                                  ? "border-blue-400 shadow-md"
+                                  : "border-gray-300"
+                              } flex flex-col items-center justify-center`}
+                            >
+                              <span
+                                className={`text-[10px] sm:text-xs font-bold ${suitColor[card.suit]}`}
+                              >
+                                {card.rank}
+                              </span>
+                              <span
+                                className={`text-sm sm:text-base ${suitColor[card.suit]}`}
+                              >
+                                {suitSymbol[card.suit]}
+                              </span>
+                            </motion.div>
+                          ))
+                        : player.cards.map((_: any, ci: number) => (
+                            <motion.div
+                              key={ci}
+                              initial={{ x: 0, y: -60, opacity: 0 }}
+                              animate={{ x: 0, y: 0, opacity: 1 }}
+                              transition={{
+                                delay: ci * 0.15 + visualIdx * 0.05,
+                                duration: 0.4,
+                                type: "spring",
+                              }}
+                              className="w-9 h-13 sm:w-10 sm:h-14 bg-gradient-to-br from-blue-800 to-blue-600 rounded border-2 border-blue-500 flex items-center justify-center shadow-md"
+                            >
+                              <div className="w-5 h-5 rounded-full border border-blue-400/50 bg-blue-700/50" />
+                            </motion.div>
+                          ))
+                      : null}
+                  </div>
+
+                  {/* Status badges */}
+                  {player.has_folded && (
+                    <div className="text-center mt-1">
+                      <span className="text-[9px] bg-red-900/80 text-red-300 px-1.5 py-0.5 rounded font-bold">
+                        FOLDED
+                      </span>
+                    </div>
+                  )}
+                  {player.is_all_in && !player.has_folded && (
+                    <div className="text-center mt-1">
+                      <motion.span
+                        animate={{ opacity: [1, 0.5, 1] }}
+                        transition={{ duration: 1, repeat: Infinity }}
+                        className="text-[9px] bg-purple-900/80 text-purple-300 px-1.5 py-0.5 rounded font-bold"
+                      >
+                        ALL IN
+                      </motion.span>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ─── ACTION CONTROLS (Bottom Panel) ─── */}
       {isMyTurn && myPlayer && !myPlayer.has_folded && (
         <motion.div
-          initial={{ y: 20, opacity: 0 }}
+          initial={{ y: 30, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
-          className="bg-gray-800 border border-yellow-600 rounded-xl p-6"
+          className="mt-4 bg-gray-800/95 backdrop-blur border border-yellow-600/50 rounded-xl p-4"
         >
-          <h3 className="text-center text-yellow-400 font-semibold mb-4">
-            Your Action
-          </h3>
-          <div className="flex flex-wrap justify-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-3">
             <button
               onClick={() => makeMove("fold")}
-              className="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-colors"
+              className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-500 transition-all hover:scale-105 active:scale-95 shadow-lg"
             >
               Fold
             </button>
@@ -768,16 +1104,16 @@ const ActiveGameView: React.FC<{
             {canCheck ? (
               <button
                 onClick={() => makeMove("check")}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-colors"
+                className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-all hover:scale-105 active:scale-95 shadow-lg"
               >
                 Check
               </button>
             ) : (
               <button
                 onClick={() => makeMove("call")}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-colors"
+                className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-500 transition-all hover:scale-105 active:scale-95 shadow-lg"
               >
-                Call ({callAmount})
+                Call {callAmount}
               </button>
             )}
 
@@ -790,11 +1126,11 @@ const ActiveGameView: React.FC<{
                 }
                 min={minRaise}
                 max={myPlayer.chip_count + myPlayer.current_bet}
-                className="w-24 px-3 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white text-center"
+                className="w-20 px-2 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-center text-sm"
               />
               <button
                 onClick={() => makeMove("raise", raiseAmount || minRaise)}
-                className="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-500 transition-colors"
+                className="px-5 py-2.5 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-500 transition-all hover:scale-105 active:scale-95 shadow-lg"
               >
                 Raise
               </button>
@@ -804,7 +1140,7 @@ const ActiveGameView: React.FC<{
               onClick={() =>
                 makeMove("raise", myPlayer.chip_count + myPlayer.current_bet)
               }
-              className="px-6 py-3 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-500 transition-colors"
+              className="px-5 py-2.5 bg-purple-600 text-white rounded-lg font-semibold hover:bg-purple-500 transition-all hover:scale-105 active:scale-95 shadow-lg"
             >
               All In ({myPlayer.chip_count})
             </button>
@@ -812,50 +1148,55 @@ const ActiveGameView: React.FC<{
         </motion.div>
       )}
 
-      {/* Waiting for opponent */}
+      {/* Waiting indicator */}
       {!isMyTurn &&
         gameState.phase !== "finished" &&
         gameState.phase !== "showdown" &&
         myPlayer &&
         !myPlayer.has_folded && (
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 text-center">
-            <p className="text-gray-400">
+          <div className="mt-4 text-center">
+            <p className="text-gray-500 text-sm">
               Waiting for{" "}
               <span className="text-yellow-400 font-semibold">
                 {getPlayerDisplayName(
                   gameState.players[gameState.current_player]?.user_id,
                 )}
-              </span>{" "}
-              to act...
+              </span>
             </p>
           </div>
         )}
 
-      {/* Game Over */}
+      {/* ─── GAME OVER OVERLAY ─── */}
       {(gameState.phase === "finished" || gameState.phase === "showdown") && (
-        <div className="space-y-4">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mt-4 space-y-4"
+        >
           {/* Winner Banner */}
           {gameState.result && (
             <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
+              initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{ type: "spring", stiffness: 200 }}
-              className="bg-gradient-to-r from-yellow-900/50 via-yellow-700/30 to-yellow-900/50 border-2 border-yellow-500 rounded-xl p-6 text-center"
+              className="bg-gradient-to-r from-yellow-900/60 via-yellow-700/40 to-yellow-900/60 border-2 border-yellow-500/70 rounded-xl p-5 text-center"
             >
               <motion.div
-                animate={{ rotate: [0, -3, 3, -3, 0] }}
-                transition={{ duration: 0.5, delay: 0.3 }}
+                animate={{ rotate: [0, -5, 5, -5, 0], scale: [1, 1.1, 1] }}
+                transition={{ duration: 0.8, delay: 0.2 }}
                 className="text-4xl mb-2"
               >
                 🏆
               </motion.div>
-              <h3 className="text-2xl font-bold text-yellow-400 mb-1">
+              <h3 className="text-xl font-bold text-yellow-400 mb-1">
                 {gameState.result.winners.length > 1 ? "Split Pot!" : "Winner!"}
               </h3>
               {gameState.result.winners.map((w: any) => (
                 <div key={w.user_id} className="mb-2">
-                  <p className="text-xl font-semibold text-white">
-                    {w.user_id === user?.id ? "🎉 You won!" : `${getPlayerDisplayName(w.user_id)} wins!`}
+                  <p className="text-lg font-semibold text-white">
+                    {w.user_id === user?.id
+                      ? "🎉 You won!"
+                      : `${getPlayerDisplayName(w.user_id)} wins!`}
                   </p>
                   <p className="text-yellow-300 text-sm">
                     with <span className="font-bold">{w.hand_description}</span>
@@ -864,7 +1205,7 @@ const ActiveGameView: React.FC<{
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
                     transition={{ delay: 0.5 }}
-                    className="text-green-400 text-lg font-bold mt-1"
+                    className="text-green-400 font-bold mt-1"
                   >
                     +{w.chips_won} chips
                   </motion.p>
@@ -873,46 +1214,63 @@ const ActiveGameView: React.FC<{
             </motion.div>
           )}
 
-          {/* All Players Results */}
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
-            <h4 className="text-sm text-gray-400 font-semibold mb-3 uppercase tracking-wide">
+          {/* Round Results */}
+          <div className="bg-gray-800/90 border border-gray-700 rounded-xl p-4">
+            <h4 className="text-xs text-gray-400 font-semibold mb-2 uppercase tracking-wide">
               Round Results
             </h4>
-            <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {gameState.players?.map((p: any) => {
-                const isWinner = gameState.result?.winners.some((w: any) => w.user_id === p.user_id);
+                const isWinner = gameState.result?.winners.some(
+                  (w: any) => w.user_id === p.user_id,
+                );
                 const resultInfo = isWinner
-                  ? gameState.result?.winners.find((w: any) => w.user_id === p.user_id)
-                  : gameState.result?.losers.find((l: any) => l.user_id === p.user_id);
+                  ? gameState.result?.winners.find(
+                      (w: any) => w.user_id === p.user_id,
+                    )
+                  : gameState.result?.losers.find(
+                      (l: any) => l.user_id === p.user_id,
+                    );
 
                 return (
                   <motion.div
                     key={p.user_id}
-                    initial={{ x: -20, opacity: 0 }}
+                    initial={{ x: -10, opacity: 0 }}
                     animate={{ x: 0, opacity: 1 }}
-                    className={`flex items-center justify-between p-3 rounded-lg ${
-                      isWinner ? "bg-yellow-900/30 border border-yellow-600/50" : "bg-gray-700/50"
+                    className={`flex items-center justify-between p-2 rounded-lg ${
+                      isWinner
+                        ? "bg-yellow-900/30 border border-yellow-600/40"
+                        : "bg-gray-700/40"
                     }`}
                   >
-                    <div className="flex items-center gap-3">
-                      {isWinner && <span className="text-xl">👑</span>}
-                      {!isWinner && p.has_folded && <span className="text-xl">🏳️</span>}
-                      {!isWinner && !p.has_folded && <span className="text-xl">💀</span>}
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">
+                        {isWinner ? "👑" : p.has_folded ? "🏳️" : "💀"}
+                      </span>
                       <div>
-                        <p className={`font-semibold ${p.user_id === user?.id ? "text-blue-400" : "text-white"}`}>
-                          {p.user_id === user?.id ? "You" : getPlayerDisplayName(p.user_id)}
+                        <p
+                          className={`text-sm font-semibold ${p.user_id === user?.id ? "text-blue-400" : "text-white"}`}
+                        >
+                          {p.user_id === user?.id
+                            ? "You"
+                            : getPlayerDisplayName(p.user_id)}
                         </p>
-                        <p className="text-xs text-gray-400">
-                          {resultInfo?.hand_description || (p.has_folded ? "Folded" : "—")}
+                        <p className="text-[10px] text-gray-400">
+                          {resultInfo?.hand_description ||
+                            (p.has_folded ? "Folded" : "—")}
                         </p>
                       </div>
                     </div>
                     <div className="text-right">
-                      <p className={`font-bold ${isWinner ? "text-green-400" : "text-gray-300"}`}>
-                        {p.chip_count} chips
+                      <p
+                        className={`text-sm font-bold ${isWinner ? "text-green-400" : "text-gray-300"}`}
+                      >
+                        {p.chip_count}
                       </p>
                       {isWinner && resultInfo && (
-                        <p className="text-green-400 text-xs">+{resultInfo.chips_won}</p>
+                        <p className="text-green-400 text-[10px]">
+                          +{resultInfo.chips_won}
+                        </p>
                       )}
                     </div>
                   </motion.div>
@@ -921,44 +1279,62 @@ const ActiveGameView: React.FC<{
             </div>
           </div>
 
-          {/* Revealed Cards */}
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
-            <h4 className="text-sm text-gray-400 font-semibold mb-3 uppercase tracking-wide">
+          {/* Revealed Hands */}
+          <div className="bg-gray-800/90 border border-gray-700 rounded-xl p-4">
+            <h4 className="text-xs text-gray-400 font-semibold mb-2 uppercase tracking-wide">
               Revealed Hands
             </h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {gameState.players?.filter((p: any) => !p.has_folded).map((p: any) => (
-                <div key={p.user_id} className="flex items-center gap-3 p-3 bg-gray-700/50 rounded-lg">
-                  <span className={`text-sm font-semibold ${p.user_id === user?.id ? "text-blue-400" : "text-white"}`}>
-                    {p.user_id === user?.id ? "You" : getPlayerDisplayName(p.user_id)}:
-                  </span>
-                  <div className="flex gap-1">
-                    {p.cards?.map((card: any, i: number) => (
-                      <div key={i} className="w-10 h-14 bg-white rounded border border-gray-300 flex flex-col items-center justify-center">
-                        <span className={`text-xs font-bold ${suitColor[card.suit]}`}>{card.rank}</span>
-                        <span className={`text-sm ${suitColor[card.suit]}`}>{suitSymbol[card.suit]}</span>
-                      </div>
-                    ))}
+            <div className="flex flex-wrap gap-3 justify-center">
+              {gameState.players
+                ?.filter((p: any) => !p.has_folded)
+                .map((p: any) => (
+                  <div
+                    key={p.user_id}
+                    className="flex items-center gap-2 p-2 bg-gray-700/50 rounded-lg"
+                  >
+                    <span className="text-xs font-semibold text-gray-300">
+                      {p.user_id === user?.id
+                        ? "You"
+                        : getPlayerDisplayName(p.user_id)}
+                    </span>
+                    <div className="flex gap-0.5">
+                      {p.cards?.map((card: any, i: number) => (
+                        <div
+                          key={i}
+                          className="w-8 h-12 bg-white rounded border border-gray-300 flex flex-col items-center justify-center"
+                        >
+                          <span
+                            className={`text-[9px] font-bold ${suitColor[card.suit]}`}
+                          >
+                            {card.rank}
+                          </span>
+                          <span className={`text-xs ${suitColor[card.suit]}`}>
+                            {suitSymbol[card.suit]}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
 
-          {/* Deal Next Hand Button */}
+          {/* Deal Next Hand */}
           <div className="text-center">
             {isHost ? (
               <button
                 onClick={() => dealNextHand()}
-                className="px-8 py-4 bg-gradient-to-r from-yellow-600 to-yellow-500 text-black rounded-xl font-bold text-lg hover:from-yellow-500 hover:to-yellow-400 transition-all shadow-lg shadow-yellow-600/30"
+                className="px-8 py-3 bg-gradient-to-r from-yellow-600 to-yellow-500 text-black rounded-xl font-bold text-lg hover:from-yellow-500 hover:to-yellow-400 transition-all shadow-lg shadow-yellow-600/30 hover:scale-105 active:scale-95"
               >
                 🃏 Deal Next Hand
               </button>
             ) : (
-              <p className="text-gray-400 text-sm">Waiting for host to deal the next hand...</p>
+              <p className="text-gray-400 text-sm">
+                Waiting for host to deal next hand...
+              </p>
             )}
           </div>
-        </div>
+        </motion.div>
       )}
     </div>
   );
