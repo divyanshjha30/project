@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Crown, Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { Mail, Lock, Eye, EyeOff } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import toast from "react-hot-toast";
 
@@ -44,9 +44,7 @@ const Login: React.FC = () => {
         {/* Logo */}
         <div className="text-center mb-8">
           <Link to="/" className="inline-flex items-center space-x-3">
-            <div className="bg-gradient-to-r from-yellow-400 to-yellow-600 p-3 rounded-lg">
-              <Crown className="h-8 w-8 text-black" />
-            </div>
+            <img src="/logo.png" alt="Royal Casino" className="h-12 w-12 rounded-lg object-cover" />
             <div>
               <h1 className="text-2xl font-bold text-white">Royal Casino</h1>
               <p className="text-sm text-gray-400">Virtual Chips Only</p>

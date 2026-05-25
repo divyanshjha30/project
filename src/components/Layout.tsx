@@ -8,7 +8,6 @@ import {
   LogOut,
   Shield,
   Coins,
-  Crown,
   History,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
@@ -57,13 +56,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           <div className="flex justify-between items-center h-16">
             {/* Logo */}
             <Link to="/dashboard" className="flex items-center space-x-3">
-              <motion.div
-                className="bg-gradient-to-r from-yellow-400 to-yellow-600 p-2 rounded-lg"
+              <motion.img
+                src="/logo.png"
+                alt="Royal Casino"
+                className="h-10 w-10 rounded-lg object-cover"
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
-              >
-                <Crown className="h-6 w-6 text-black" />
-              </motion.div>
+              />
               <div>
                 <h1 className="text-xl font-bold text-white">Royal Casino</h1>
                 <p className="text-xs text-gray-400">Virtual Chips Only</p>
