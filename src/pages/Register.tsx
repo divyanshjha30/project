@@ -102,7 +102,11 @@ const Register: React.FC = () => {
         {/* Logo */}
         <div className="text-center mb-8">
           <Link to="/" className="inline-flex items-center space-x-3">
-            <img src="/logo.png" alt="Royal Casino" className="h-12 w-12 rounded-lg object-cover" />
+            <img
+              src="/logo.png"
+              alt="Royal Casino"
+              className="h-12 w-12 rounded-lg object-cover"
+            />
             <div>
               <h1 className="text-2xl font-bold text-white">Royal Casino</h1>
               <p className="text-sm text-gray-400">Virtual Chips Only</p>
